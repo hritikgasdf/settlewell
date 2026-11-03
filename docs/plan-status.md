@@ -43,7 +43,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 39. Feature freeze — in review. No new actions, incidents, or console pages after this line. https://github.com/hritikgasdf/settlewell/pull/35
 40. Rehearse the hero twice on the sandbox — done. First pair https://github.com/hritikgasdf/settlewell/pull/36. Locked-quote pair https://github.com/hritikgasdf/settlewell/pull/37.
 41. Rough-cut video and side clips — not started. No PR.
-42. Writeup outline and draft — not started. No PR.
+42. Writeup outline and draft — in review. Outline and full draft in docs/writeup.md. https://github.com/hritikgasdf/settlewell/pull/38
 43. Final video and backup recording — not started. No PR.
 44. Writeup final and judge repo access — not started. No PR.
 45. Dry-run the form and submit — not started. No PR.
