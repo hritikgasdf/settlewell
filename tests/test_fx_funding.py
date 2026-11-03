@@ -2,9 +2,17 @@
 
 from decimal import Decimal
 
+import pytest
+
 from backend.airwallex.types import Balance, Conversion, FxQuote
-from backend.fx_funding import FX_LIMIT, RESERVE_FLOOR, fund_replacement
-from backend.ledger import connect, seed_hero
+from backend.fx_funding import (
+    FX_LIMIT,
+    RESERVE_FLOOR,
+    conversion_request_id,
+    fund_replacement,
+    reserve_floor,
+)
+from backend.ledger import LedgerError, connect, consume_fx_quote, seed_hero
 
 AS_OF = "2026-11-03T12:00:00+00:00"
 
@@ -147,3 +155,33 @@ def test_a_quote_the_usd_balance_cannot_cover_does_not_convert():
     assert book.conversions == []
     quote = conn.execute("SELECT state FROM fx_quote").fetchone()
     assert quote["state"] == "LOCKED"
+
+
+def test_each_quote_gets_its_own_conversion_request_id():
+    first = conversion_request_id("quo_one")
+    second = conversion_request_id("quo_two")
+    assert first != second
+    assert first == conversion_request_id("quo_one")
+    assert 10 <= len(first) <= 50
+    assert 10 <= len(second) <= 50
+
+
+def test_a_demo_floor_above_the_balance_converts_once_under_the_limit(monkeypatch):
+    assert reserve_floor() == RESERVE_FLOOR
+    conn = connect()
+    obligation_id = _obligation(conn)
+    book = Book("10000.00", "100000.00")
+    monkeypatch.setenv("SETTLEWELL_RESERVE_FLOOR", "15000.00")
+    shortfall = Decimal("4200.00") + Decimal("15000.00") - Decimal("10000.00")
+    assert shortfall <= FX_LIMIT
+
+    result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
+
+    assert result.action == "converted"
+    assert result.buy_amount == shortfall
+    assert len(book.conversions) == 1
+    stored = conn.execute("SELECT state, consumed_by FROM fx_quote").fetchone()
+    assert stored["state"] == "CONSUMED"
+    assert stored["consumed_by"] == "con_hero"
+    with pytest.raises(LedgerError):
+        consume_fx_quote(conn, result.quote_id, "again")

@@ -15,6 +15,7 @@ from backend.approvals import (
     binding_hash,
     propose,
 )
+from backend.fx_funding import conversion_request_id
 from backend.ledger import (
     LedgerError,
     consume_fx_quote,
@@ -83,10 +84,6 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
     if problem == "expired":
         return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"])
     quote = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
-    incident = conn.execute(
-        "SELECT obligation_id FROM incident WHERE id = ?",
-        (row["incident_id"],),
-    ).fetchone()
     sell, buy = quote["pair"].split("/")
     quote_id = str(terms.quote_id)
     try:
@@ -100,7 +97,7 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
             buy_currency=buy,
             sell_currency=sell,
             buy_amount=Decimal(quote["amount"]),
-            request_id=f"stl-fx-{incident['obligation_id']}",
+            request_id=conversion_request_id(quote_id),
         )
     except AirwallexError as error:
         if error.code in _AIRWALLEX_EXPIRY:

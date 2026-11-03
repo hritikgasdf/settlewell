@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -10,6 +11,24 @@ from backend.ledger import consume_fx_quote, lock_fx_quote, record_fx_conversion
 RESERVE_FLOOR = Decimal("1000.00")
 FX_LIMIT = Decimal("10000.00")
 _QUOTE_VALIDITY = "MIN_15"
+_FLOOR_ENV = "SETTLEWELL_RESERVE_FLOOR"
+
+
+def conversion_request_id(quote_id: str) -> str:
+    """One Airwallex request id per quote, so a later quote is not rejected as a replay."""
+    slug = "".join(character for character in quote_id.lower() if character.isalnum())[-24:]
+    request_id = f"stl-fx-{slug or 'quote'}"
+    if len(request_id) < 10:
+        request_id = f"{request_id}quote"[:10]
+    return request_id[:50]
+
+
+def reserve_floor() -> Decimal:
+    """Default €1,000. A rehearsal may set a higher floor so the sandbox converts."""
+    raw = os.environ.get(_FLOOR_ENV, "").strip()
+    if not raw:
+        return RESERVE_FLOOR
+    return Decimal(raw)
 
 
 class FundingError(Exception):
@@ -38,7 +57,7 @@ def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> Funding
     usd = _available(balances, "USD")
     _snapshot(conn, "EUR", eur, as_of, "before")
     _snapshot(conn, "USD", usd, as_of, "before")
-    needed = Decimal(obligation["amount"]) + RESERVE_FLOOR
+    needed = Decimal(obligation["amount"]) + reserve_floor()
     if eur >= needed:
         conn.commit()
         return FundingResult("ready")
@@ -70,7 +89,7 @@ def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> Funding
         buy_currency="EUR",
         sell_currency="USD",
         buy_amount=shortfall,
-        request_id=f"stl-fx-{obligation_id}",
+        request_id=conversion_request_id(quote.quote_id),
     )
     record_fx_conversion(conn, quote.quote_id, conversion.conversion_id)
     after = client.current_balances()
