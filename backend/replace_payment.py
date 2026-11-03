@@ -62,6 +62,9 @@ def replace_payment(
         if existing is not None:
             conn.rollback()
             raise ReplaceError("in_flight")
+        if _other_live(conn, obligation_id, request_id):
+            conn.rollback()
+            raise ReplaceError("live")
         amount = transfer_amount if transfer_amount is not None else Decimal(obligation["amount"])
         currency = transfer_currency or obligation["currency"]
         remote = _create_or_find(
@@ -174,6 +177,21 @@ def _past_dedupe_margin(conn, obligation_id: int, as_of: str | None) -> bool:
     failed_on = datetime.fromisoformat(row["seen_at"])
     now = datetime.fromisoformat(as_of)
     return now - failed_on > _DEDUPE_MARGIN
+
+
+def _other_live(conn, obligation_id: int, request_id: str) -> bool:
+    """A second in-flight payment for the same invoice is refused."""
+    row = conn.execute(
+        """
+        SELECT id FROM transfer_record
+        WHERE obligation_id = ?
+          AND origin = 'settlewell'
+          AND status IN ('SCHEDULED', 'PROCESSING', 'SENT', 'PAID', 'OVERDUE')
+          AND COALESCE(request_id, '') != ?
+        """,
+        (obligation_id, request_id),
+    ).fetchone()
+    return row is not None
 
 
 def _by_request_id(conn, request_id: str):
