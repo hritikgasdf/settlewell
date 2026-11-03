@@ -19,7 +19,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 15. WAIT, status-gated proof, ETA, and TRACE draft — in review. Proof attached while SENT; refused after CANCELLED. https://github.com/hritikgasdf/settlewell/pull/10
 16. Approval service (bound hash, single use, void on change) — in review. Changed details void the approval; a second click is rejected. https://github.com/hritikgasdf/settlewell/pull/11
 17. Approver ≠ proposer and two demo identities — in review. Self-approval is rejected. https://github.com/hritikgasdf/settlewell/pull/12
-18. STOP_DUPLICATE cancel of a scheduled duplicate — not started. No PR.
+18. STOP_DUPLICATE cancel of a scheduled duplicate — in review. Scheduled duplicate cancels with no ledger impact; update_unsupported is re-read. https://github.com/hritikgasdf/settlewell/pull/13
 19. REPLACE lock, request_id, and duplicate_request_id handling — not started. No PR.
 20. One replacement per failure, unknown outcome stays IN_FLIGHT, 6-day rule — not started. No PR.
 21. Replacement tool input is obligation_id + incident_ref only — not started. No PR.
