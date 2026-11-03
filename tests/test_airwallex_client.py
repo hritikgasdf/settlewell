@@ -334,3 +334,37 @@ def test_cancel_object_is_parsed_as_a_transfer():
     assert result.transfer is not None
     assert result.transfer.status == "CANCELLED"
     assert result.transfer.id == "tr_9"
+
+
+def test_validate_reports_iban_code_083_instead_of_raising():
+    transport = FakeTransport()
+    clock = FakeClock()
+    transport.push(201, login(clock))
+    transport.push(
+        400,
+        {
+            "code": "validation_failed",
+            "message": "This is not valid.",
+            "details": {
+                "errors": [{"source": "beneficiary.bank_details.iban", "code": "083"}],
+            },
+        },
+    )
+    api = client(transport, clock)
+
+    result = api.validate_beneficiary({"beneficiary": {"bank_details": {"iban": "not-an-iban"}}})
+
+    assert result.ok is False
+    assert result.field_codes == ("083",)
+
+
+def test_validate_still_raises_when_the_service_is_down():
+    transport = FakeTransport()
+    clock = FakeClock()
+    transport.push(201, login(clock))
+    transport.push(400, {"code": "service_unavailable", "message": "try later"})
+    api = client(transport, clock)
+
+    with pytest.raises(AirwallexError) as caught:
+        api.validate_beneficiary({"beneficiary": {}})
+    assert caught.value.code == "service_unavailable"
