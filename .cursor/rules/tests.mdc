@@ -1,0 +1,13 @@
+---
+description: Test rules when editing unit tests or the incident harness
+globs: tests/**/*.py,evals/**/*.py
+alwaysApply: false
+---
+
+# Tests
+
+- `uv run pytest` must pass with no network and no secrets. The suite blocks sockets unless the test is marked `sandbox` and `SETTLEWELL_SANDBOX=1`.
+- Do not put a live Airwallex call in the default run. Mark it `sandbox` and skip it unless that flag is set.
+- Do not print secret values or assert on raw keys. Use synthetic suppliers and amounts.
+- Webhook cases, once those modules exist, must include out-of-order delivery and `paid` before `failed` on a bank return. Order by `x-timestamp` and status rank, not by arrival.
+- Never log the client id, API key, bearer token, or webhook secret from a test.
