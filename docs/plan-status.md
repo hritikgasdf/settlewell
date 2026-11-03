@@ -1,16 +1,16 @@
 # Plan status
 
-Build-plan checklist §5, one line each. Item 8 is in an open PR. Items 9–45 are not started.
+Build-plan checklist §5, one line each. Item 8 is merged. Item 9 is in an open PR. Items 10–45 are not started.
 
 1. Claim Claude credits — done (Hritik). No PR.
 2. Private repo and .gitignore — done. Merged https://github.com/hritikgasdf/settlewell/pull/1
 3. Airwallex Docs MCP — done. https://github.com/hritikgasdf/settlewell/pull/1
 4. Block calendar through Sun 15 Nov — not started (Hritik's). No PR.
 5. Gmail filter for sandbox mail — not started (optional). No PR.
-6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. This PR wires Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`). Still open: loading `.env`, Node 20, and the LLM key. https://github.com/hritikgasdf/settlewell/pull/2
+6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`) is merged in https://github.com/hritikgasdf/settlewell/pull/2. Still open: loading `.env`, Node 20, and the LLM key.
 7. Sandbox smoke (login, then balances) — done. Login 201, balances 200. No PR.
-8. Airwallex adapter — done. Token cache, re-login on 401, pinned `2025-11-11`, 5 requests/second, 429 backoff, typed calls for transfers, beneficiaries, letters, balances, and FX. https://github.com/hritikgasdf/settlewell/pull/3
-9. Sandbox driver and contract check — not started. No PR.
+8. Airwallex adapter — merged. Token cache, re-login on 401, pinned `2025-11-11`, 5 requests/second, 429 backoff, typed calls for transfers, beneficiaries, letters, balances, and FX. https://github.com/hritikgasdf/settlewell/pull/3
+9. Sandbox driver and contract check — done. Create, SENT, FAILED 90701, CANCELLED on GET, letter, and balance-history join. https://github.com/hritikgasdf/settlewell/pull/4
 10. Data model and ledger — not started. No PR.
 11. Poller, PAYOUT_REVERSAL join, and account-wide transfer index — not started. No PR.
 12. Policy engine v1 and failure-code tests — not started. No PR.
