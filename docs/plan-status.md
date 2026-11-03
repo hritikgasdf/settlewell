@@ -31,7 +31,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 27. Webhook receiver (HMAC, dedupe, ordering, paid settle window) — in review. Out-of-order and replayed events leave the correct state. https://github.com/hritikgasdf/settlewell/pull/22
 28. Console skeleton — in review. Inbox links open the timeline, decision, approval, and audit for beats 1–4. https://github.com/hritikgasdf/settlewell/pull/23
 29. Money ledger screen — in review. Result screen shows paid once and incident cost €13.47. https://github.com/hritikgasdf/settlewell/pull/24
-30. Visible outbox — not started. No PR.
+30. Visible outbox — in review. A reply waits until approved and is never sent. https://github.com/hritikgasdf/settlewell/pull/25
 31. Eval harness, first 15 incidents — not started. No PR.
 32. Remaining 15 incidents — not started. No PR.
 33. Property test — not started. No PR.
