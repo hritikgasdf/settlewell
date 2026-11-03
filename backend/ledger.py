@@ -345,6 +345,27 @@ def set_obligation_status(conn: sqlite3.Connection, obligation_id: int, status: 
     conn.execute("UPDATE obligation SET status = ? WHERE id = ?", (status, obligation_id))
 
 
+def open_duplicate_incident(
+    conn: sqlite3.Connection,
+    *,
+    obligation_id: int,
+    airwallex_id: str,
+) -> int | None:
+    """Open one incident for an extra live payment. Returns None if that payment is already flagged."""
+    marker = f"duplicate:{airwallex_id}"
+    existing = conn.execute(
+        "SELECT id FROM incident WHERE obligation_id = ? AND claim_json = ?",
+        (obligation_id, marker),
+    ).fetchone()
+    if existing:
+        return None
+    cursor = conn.execute(
+        "INSERT INTO incident (obligation_id, claim_json, state) VALUES (?, ?, 'DUPLICATE')",
+        (obligation_id, marker),
+    )
+    return int(cursor.lastrowid)
+
+
 def insert_external_transfer(
     conn: sqlite3.Connection,
     *,
