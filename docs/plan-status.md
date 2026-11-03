@@ -26,7 +26,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 22. N1 refund-confirmed replacement — in review. Card shows principal back €4,200 · fee lost €13.47 before REPLACE unlocks. https://github.com/hritikgasdf/settlewell/pull/17
 23. Bank-change gate and new beneficiary — in review. Unverified details can't be paid; diff Commerzbank → DKB on the card. https://github.com/hritikgasdf/settlewell/pull/18
 24. FX adapter, reserve floor, and limit — in review. USD→EUR converts when EUR is under the floor; over the limit escalates. https://github.com/hritikgasdf/settlewell/pull/19
-25. FxQuote single-use and expiry check — not started. No PR.
+25. FxQuote single-use and expiry check — in review. Reused quote rejected as consumed; expired quote is replaced and approved again. https://github.com/hritikgasdf/settlewell/pull/20
 26. N2 colleague already re-paid — not started. No PR.
 27. Webhook receiver (HMAC, dedupe, ordering, paid settle window) — not started. No PR.
 28. Console skeleton — not started. No PR.
