@@ -15,6 +15,7 @@ from backend.ledger import (
     lock_fx_quote,
     migrate,
 )
+from backend.mock_replay import render_replay
 from backend.outbox import draft_reply, outbox_rows
 from backend.policy import decide
 from backend.reconcile import timeline
@@ -49,6 +50,8 @@ def render(path: str, conn=None) -> str:
         page = _ledger(conn)
     elif path == "/outbox":
         page = _outbox(conn)
+    elif path == "/replay":
+        page = render_replay()
     elif path.startswith("/incidents/"):
         page = _incident(conn, path.removeprefix("/incidents/"))
     else:
@@ -285,7 +288,8 @@ def _inbox(conn) -> str:
         text = f"{label} · {row['invoice_ref']} · {row['proposed_action']}"
         items.append(f'<li><a href="{escape(href)}">{escape(text)}</a></li>')
     body = (
-        '<p><a href="/ledger">Money ledger</a> · <a href="/outbox">Outbox</a></p>'
+        '<p><a href="/ledger">Money ledger</a> · <a href="/outbox">Outbox</a>'
+        ' · <a href="/replay">Hero replay</a></p>'
         f'<ul class="inbox">{"".join(items)}</ul>'
     )
     return _layout("Inbox", body)
