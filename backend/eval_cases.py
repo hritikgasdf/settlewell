@@ -236,8 +236,8 @@ REST: tuple[dict, ...] = (
         "kind": "fx_floor",
         "status": "CANCELLED",
         "claim": "where",
-        "expected_action": "converted",
-        "expected_rule": "escalate",
+        "expected_action": "R-FX-FLOOR-CONVERT",
+        "expected_rule": "R-FX-LIMIT-ESCALATE",
     },
     {
         "number": 25,
@@ -246,7 +246,7 @@ REST: tuple[dict, ...] = (
         "status": "SENT",
         "claim": "where",
         "expected_action": "CANCELLED",
-        "expected_rule": "90802",
+        "expected_rule": "R-WEBHOOK-ORDER",
     },
     {
         "number": 26,
@@ -255,7 +255,7 @@ REST: tuple[dict, ...] = (
         "status": "CANCELLED",
         "claim": "new_details",
         "expected_action": "REJECT",
-        "expected_rule": "callback",
+        "expected_rule": "R-BANK-CALLBACK-REQUIRED",
     },
     {
         "number": 27,
@@ -281,8 +281,8 @@ REST: tuple[dict, ...] = (
         "kind": "quote_reuse",
         "status": "CANCELLED",
         "claim": "where",
-        "expected_action": "CONSUMED",
-        "expected_rule": "reapprove",
+        "expected_action": "R-FX-QUOTE-CONSUMED",
+        "expected_rule": "R-FX-QUOTE-EXPIRED",
     },
     {
         "number": 30,
