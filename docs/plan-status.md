@@ -17,7 +17,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 13. Claim parser and match to obligation — merged. Hero email matches INV-2291; bad JSON escalates. https://github.com/hritikgasdf/settlewell/pull/8
 14. Account-wide paid-once scan — in review. A colleague's SCHEDULED duplicate is its own incident. https://github.com/hritikgasdf/settlewell/pull/9
 15. WAIT, status-gated proof, ETA, and TRACE draft — in review. Proof attached while SENT; refused after CANCELLED. https://github.com/hritikgasdf/settlewell/pull/10
-16. Approval service (bound hash, single use, void on change) — not started. No PR.
+16. Approval service (bound hash, single use, void on change) — in review. Changed details void the approval; a second click is rejected. https://github.com/hritikgasdf/settlewell/pull/11
 17. Approver ≠ proposer and two demo identities — not started. No PR.
 18. STOP_DUPLICATE cancel of a scheduled duplicate — not started. No PR.
 19. REPLACE lock, request_id, and duplicate_request_id handling — not started. No PR.
