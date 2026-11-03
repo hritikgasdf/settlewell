@@ -1,0 +1,223 @@
+"""A quote is used once. An expired quote is replaced and approved again. No network."""
+
+from decimal import Decimal
+
+import pytest
+
+from backend.airwallex.client import AirwallexError
+from backend.airwallex.types import Conversion, FxQuote
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalError, ApprovalTerms, binding_hash
+from backend.fx_quote import FxQuoteError, approve_fx_quote, execute_fx_quote, propose_fx_quote
+from backend.ledger import connect, consume_fx_quote, lock_fx_quote, seed_hero
+
+EARLY = "2026-11-03T12:30:00+00:00"
+VALID = "2026-11-03T13:00:00+00:00"
+LATE = "2026-11-03T13:00:00+00:00"
+USED = "2026-11-03T12:40:00+00:00"
+
+
+def _terms(quote_id: str = "quo_1") -> ApprovalTerms:
+    return ApprovalTerms(
+        action="FX_FUND",
+        amount="4400.00",
+        currency="EUR",
+        beneficiary_id="ben_dkb",
+        details_hash="hash-dkb",
+        quote_id=quote_id,
+    )
+
+
+class Desk:
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.fail = fail
+        self.created: list[dict] = []
+        self.converted: list[dict] = []
+        self._next = 1
+
+    def create_quote(self, **kwargs) -> FxQuote:
+        self._next += 1
+        self.created.append(kwargs)
+        buy = kwargs["buy_amount"]
+        return FxQuote(
+            quote_id=f"quo_{self._next}",
+            client_rate=Decimal("1.10"),
+            buy_currency="EUR",
+            sell_currency="USD",
+            buy_amount=buy,
+            sell_amount=buy,
+            valid_to_at="2026-11-03T14:00:00+00:00",
+            usage="MULTI_USE",
+        )
+
+    def create_conversion(self, **kwargs) -> Conversion:
+        self.converted.append(kwargs)
+        if self.fail:
+            raise AirwallexError(400, self.fail, "")
+        return Conversion(conversion_id="con_1", status="SETTLED", quote_id=kwargs["quote_id"])
+
+
+def _proposed(conn, valid_to: str = VALID):
+    incident_id = seed_hero(conn)
+    lock_fx_quote(
+        conn,
+        quote_id="quo_1",
+        pair="USD/EUR",
+        rate="1.10",
+        amount="4400.00",
+        valid_to=valid_to,
+    )
+    terms = _terms()
+    approval_id = propose_fx_quote(conn, incident_id, terms, proposer=AP_CLERK)
+    return terms, approval_id
+
+
+def test_the_approval_hash_includes_the_quote_id():
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    stored = conn.execute(
+        "SELECT binding_hash FROM approval WHERE id = ?",
+        (approval_id,),
+    ).fetchone()
+    assert stored["binding_hash"] == binding_hash(terms)
+    other = _terms("quo_other")
+    assert binding_hash(other) != stored["binding_hash"]
+
+    with pytest.raises(ApprovalError) as caught:
+        approve_fx_quote(
+            conn,
+            Desk(),
+            approval_id,
+            other,
+            approver=FINANCE_APPROVER,
+            used_at=USED,
+            as_of=EARLY,
+        )
+    assert caught.value.code == "void"
+    assert conn.execute("SELECT used_at FROM approval WHERE id = ?", (approval_id,)).fetchone()["used_at"] is None
+
+
+def test_an_expired_quote_is_requoted_before_approval():
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    desk = Desk()
+
+    decision = approve_fx_quote(
+        conn,
+        desk,
+        approval_id,
+        terms,
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+        as_of=LATE,
+    )
+
+    assert decision.outcome == "reapprove"
+    assert decision.quote_id == "quo_2"
+    assert decision.approval_id != approval_id
+    assert conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["state"] == "EXPIRED"
+    fresh = conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_2'").fetchone()
+    assert fresh["state"] == "LOCKED"
+    assert conn.execute("SELECT used_at FROM approval WHERE id = ?", (approval_id,)).fetchone()["used_at"] is None
+    new_terms = _terms("quo_2")
+    stored = conn.execute(
+        "SELECT binding_hash FROM approval WHERE id = ?",
+        (decision.approval_id,),
+    ).fetchone()
+    assert stored["binding_hash"] == binding_hash(new_terms)
+    assert desk.created[0]["buy_amount"] == Decimal("4400.00")
+    assert desk.converted == []
+
+
+def test_an_expired_quote_is_requoted_again_before_execute():
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    approve_fx_quote(
+        conn,
+        Desk(),
+        approval_id,
+        terms,
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+        as_of=EARLY,
+    )
+    desk = Desk()
+
+    decision = execute_fx_quote(conn, desk, approval_id, terms, as_of=LATE)
+
+    assert decision.outcome == "reapprove"
+    assert decision.quote_id == "quo_2"
+    assert desk.converted == []
+    assert conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["state"] == "EXPIRED"
+    old = conn.execute("SELECT used_at FROM approval WHERE id = ?", (approval_id,)).fetchone()
+    assert old["used_at"] == USED
+    new = conn.execute(
+        "SELECT used_at FROM approval WHERE id = ?",
+        (decision.approval_id,),
+    ).fetchone()
+    assert new["used_at"] is None
+
+
+def test_a_reused_quote_is_rejected_as_consumed():
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    approve_fx_quote(
+        conn,
+        Desk(),
+        approval_id,
+        terms,
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+        as_of=EARLY,
+    )
+    desk = Desk()
+    first = execute_fx_quote(conn, desk, approval_id, terms, as_of=EARLY)
+    assert first.outcome == "converted"
+    assert first.conversion_id == "con_1"
+
+    with pytest.raises(FxQuoteError) as caught:
+        execute_fx_quote(conn, desk, approval_id, terms, as_of=EARLY)
+    assert caught.value.code == "consumed"
+    assert len(desk.converted) == 1
+    assert conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["state"] == "CONSUMED"
+
+
+def test_a_consumed_quote_is_not_approved():
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    consume_fx_quote(conn, "quo_1", "con_earlier")
+    conn.commit()
+
+    with pytest.raises(FxQuoteError) as caught:
+        approve_fx_quote(
+            conn,
+            Desk(),
+            approval_id,
+            terms,
+            approver=FINANCE_APPROVER,
+            used_at=USED,
+            as_of=EARLY,
+        )
+    assert caught.value.code == "consumed"
+
+
+@pytest.mark.parametrize("code", ["expired_quote", "quote_expired"])
+def test_an_airwallex_expiry_code_requotes_and_asks_for_a_new_approval(code):
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    approve_fx_quote(
+        conn,
+        Desk(),
+        approval_id,
+        terms,
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+        as_of=EARLY,
+    )
+    desk = Desk(fail=code)
+
+    decision = execute_fx_quote(conn, desk, approval_id, terms, as_of=EARLY)
+
+    assert decision.outcome == "reapprove"
+    assert decision.quote_id == "quo_2"
+    assert conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["state"] == "EXPIRED"
+    assert len(desk.converted) == 1
