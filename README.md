@@ -82,6 +82,10 @@ Supplier replies sit in the outbox until a person approves them. The outbox does
 
 The sandbox console reads the local ledger and does not call Airwallex from its pages. A refund card uses the transfer currency. A quote is claimed with one `UPDATE` before a conversion is created. A repeated webhook inserts the event id and stops on the unique constraint. Reset lists remote `SENT` transfers for at most five pages and releases them on the demo host.
 
+## Feature freeze
+
+The payment behaviour is frozen. No new actions, incidents, or console pages. A demo rehearsal can still fix a broken run. The video and the writeup come after this line.
+
 ## MCP
 
 Cursor reads `.cursor/mcp.json` for cloud agents and for local Cursor.
