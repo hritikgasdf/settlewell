@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from backend.ledger import consume_fx_quote, lock_fx_quote, record_fx_conversion
 
@@ -28,13 +28,25 @@ def reserve_floor() -> Decimal:
     raw = os.environ.get(_FLOOR_ENV, "").strip()
     if not raw:
         return RESERVE_FLOOR
-    return Decimal(raw)
+    try:
+        floor = Decimal(raw)
+    except InvalidOperation:
+        raise FundingError(
+            "floor",
+            "SETTLEWELL_RESERVE_FLOOR must be a positive number",
+        ) from None
+    if floor <= 0:
+        raise FundingError(
+            "floor",
+            "SETTLEWELL_RESERVE_FLOOR must be a positive number",
+        )
+    return floor
 
 
 class FundingError(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, message: str | None = None) -> None:
         self.code = code
-        super().__init__(code)
+        super().__init__(message or code)
 
 
 @dataclass(frozen=True)

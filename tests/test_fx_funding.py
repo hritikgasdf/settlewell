@@ -8,6 +8,7 @@ from backend.airwallex.types import Balance, Conversion, FxQuote
 from backend.fx_funding import (
     FX_LIMIT,
     RESERVE_FLOOR,
+    FundingError,
     conversion_request_id,
     fund_replacement,
     reserve_floor,
@@ -164,6 +165,15 @@ def test_each_quote_gets_its_own_conversion_request_id():
     assert first == conversion_request_id("quo_one")
     assert 10 <= len(first) <= 50
     assert 10 <= len(second) <= 50
+
+
+@pytest.mark.parametrize("raw", ("nope", "0", "-1", "1,000"))
+def test_a_reserve_floor_that_is_not_a_positive_number_is_rejected(monkeypatch, raw):
+    monkeypatch.setenv("SETTLEWELL_RESERVE_FLOOR", raw)
+    with pytest.raises(FundingError) as caught:
+        reserve_floor()
+    assert caught.value.code == "floor"
+    assert str(caught.value) == "SETTLEWELL_RESERVE_FLOOR must be a positive number"
 
 
 def test_a_demo_floor_above_the_balance_converts_once_under_the_limit(monkeypatch):
