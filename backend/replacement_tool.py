@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from backend.airwallex.types import BalanceHistoryPage
+from backend.repaid import colleague_repaid
 from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
 
 
@@ -36,13 +37,18 @@ def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
 
 
 def propose_replacement(conn, client, *, obligation_id: int, incident_ref: str) -> str:
-    card = refund_card(conn, client, obligation_id=obligation_id)
-    if not card.unlocked:
-        raise ReplaceError("refund")
     incident = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_ref,)).fetchone()
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
     if incident is None or obligation is None or incident["obligation_id"] != obligation_id:
         raise ReplaceError("incident")
+    if incident["state"] == "CLOSED":
+        raise ReplaceError("repaid")
+    card = refund_card(conn, client, obligation_id=obligation_id)
+    if not card.unlocked:
+        raise ReplaceError("refund")
+    decision = colleague_repaid(conn, client, obligation_id=obligation_id, incident_ref=incident_ref)
+    if decision.action != "replace":
+        raise ReplaceError("repaid")
     original = conn.execute(
         "SELECT * FROM transfer_record WHERE id = ?",
         (obligation["live_transfer_id"],),
