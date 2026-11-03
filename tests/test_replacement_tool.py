@@ -83,7 +83,6 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
     assert sent["transfer_amount"] == Decimal("4200.50")
     assert sent["transfer_currency"] == "EUR"
     assert sent["beneficiary_id"] == "ben_verified"
-    assert "amount" not in sent or sent["transfer_amount"] == Decimal("4200.50")
     local = conn.execute("SELECT amount FROM obligation").fetchone()["amount"]
     assert local == "4200.00"
     assert sent["transfer_amount"] != Decimal(local)
