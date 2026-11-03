@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "airwallex-docs": {
+      "type": "http",
+      "url": "https://mcp.sandbox.airwallex.com/docs"
+    },
+    "airwallex-developer": {
+      "type": "http",
+      "url": "https://mcp.sandbox.airwallex.com/developer"
+    },
+    "airwallex-dev": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@airwallex/developer-mcp@0.3.0-beta.13"],
+      "env": {
+        "AIRWALLEX_SANDBOX_CLIENT_ID": "${env:AIRWALLEX_SANDBOX_CLIENT_ID}",
+        "AIRWALLEX_SANDBOX_API_KEY": "${env:AIRWALLEX_SANDBOX_API_KEY}",
+        "DISABLE_TELEMETRY": "true"
+      }
+    }
+  }
+}
