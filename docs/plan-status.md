@@ -25,7 +25,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 21. Replacement tool input is obligation_id + incident_ref only — in review. No amount field reaches the tool. https://github.com/hritikgasdf/settlewell/pull/16
 22. N1 refund-confirmed replacement — in review. Card shows principal back €4,200 · fee lost €13.47 before REPLACE unlocks. https://github.com/hritikgasdf/settlewell/pull/17
 23. Bank-change gate and new beneficiary — in review. Unverified details can't be paid; diff Commerzbank → DKB on the card. https://github.com/hritikgasdf/settlewell/pull/18
-24. FX adapter, reserve floor, and limit — not started. No PR.
+24. FX adapter, reserve floor, and limit — in review. USD→EUR converts when EUR is under the floor; over the limit escalates. https://github.com/hritikgasdf/settlewell/pull/19
 25. FxQuote single-use and expiry check — not started. No PR.
 26. N2 colleague already re-paid — not started. No PR.
 27. Webhook receiver (HMAC, dedupe, ordering, paid settle window) — not started. No PR.
