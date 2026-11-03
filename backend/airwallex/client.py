@@ -253,6 +253,13 @@ class AirwallexClient:
             quote_id=_optional_str(data.get("quote_id")),
         )
 
+    def post_json(self, path: str, body: Mapping) -> dict:
+        """Authenticated POST. The caller supplies the path; headers stay here."""
+        payload = self._json("POST", path, json_body=dict(body))
+        if not isinstance(payload, dict):
+            raise AirwallexError(200, "unexpected_body", "expected a JSON object")
+        return payload
+
     def _json(self, method: str, path: str, *, query=None, json_body=None):
         response = self._send(method, path, query=query, json_body=json_body)
         if not response.body:
