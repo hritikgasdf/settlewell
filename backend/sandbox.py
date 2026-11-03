@@ -67,6 +67,13 @@ class SandboxDriver:
         self._sleep = sleep or _noop
         self._attempts = attempts
 
+    def release_sent(self, transfer_id: str) -> Transfer:
+        """Move a sandbox transfer off SENT. A transfer that is not SENT is left alone."""
+        current = self._client.get_transfer(transfer_id)
+        if current.status != "SENT":
+            return current
+        return self.transition(transfer_id, "PAID")
+
     def transition(
         self,
         transfer_id: str,
