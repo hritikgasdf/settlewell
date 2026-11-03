@@ -32,7 +32,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 28. Console skeleton — in review. Inbox links open the timeline, decision, approval, and audit for beats 1–4. https://github.com/hritikgasdf/settlewell/pull/23
 29. Money ledger screen — in review. Result screen shows paid once and incident cost €13.47. https://github.com/hritikgasdf/settlewell/pull/24
 30. Visible outbox — in review. A reply waits until approved and is never sent. https://github.com/hritikgasdf/settlewell/pull/25
-31. Eval harness, first 15 incidents — not started. No PR.
+31. Eval harness, first 15 incidents — in review. Fifteen cases report pass or fail with rule id and action. https://github.com/hritikgasdf/settlewell/pull/26
 32. Remaining 15 incidents — not started. No PR.
 33. Property test — not started. No PR.
 34. Seed/reset script that leaves nothing at SENT — not started. No PR.
