@@ -23,7 +23,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 19. REPLACE lock, request_id, and duplicate_request_id handling — in review. Concurrent replace makes one transfer. https://github.com/hritikgasdf/settlewell/pull/14
 20. One replacement per failure, unknown outcome stays IN_FLIGHT, 6-day rule — in review. A second replacement is refused, and a timeout does not create attempt 2. https://github.com/hritikgasdf/settlewell/pull/15
 21. Replacement tool input is obligation_id + incident_ref only — in review. No amount field reaches the tool. https://github.com/hritikgasdf/settlewell/pull/16
-22. N1 refund-confirmed replacement — not started. No PR.
+22. N1 refund-confirmed replacement — in review. Card shows principal back €4,200 · fee lost €13.47 before REPLACE unlocks. https://github.com/hritikgasdf/settlewell/pull/17
 23. Bank-change gate and new beneficiary — not started. No PR.
 24. FX adapter, reserve floor, and limit — not started. No PR.
 25. FxQuote single-use and expiry check — not started. No PR.

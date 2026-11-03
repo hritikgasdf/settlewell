@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.airwallex.types import Transfer, TransferPage
+from backend.airwallex.types import BalanceHistoryItem, BalanceHistoryPage, Transfer, TransferPage
 from backend.ledger import connect, seed_hero
 from backend.replacement_tool import propose_replacement
 
@@ -21,7 +21,30 @@ class Record:
             transfer_amount=Decimal("4200.50"),
             transfer_currency="EUR",
             transfer_method="SWIFT",
+            fee_amount=Decimal("13.47"),
             reference="INV-2291",
+        )
+
+    def balance_history(self, **_kwargs) -> BalanceHistoryPage:
+        return BalanceHistoryPage(
+            items=(
+                BalanceHistoryItem(
+                    id="rev-1",
+                    source="awx-hero",
+                    amount=Decimal("4200.50"),
+                    currency="EUR",
+                    balance=None,
+                    description="Refund",
+                    fee=Decimal(0),
+                    posted_at=None,
+                    source_type="PAYOUT",
+                    transaction_type="PAYOUT_REVERSAL",
+                    account_type=None,
+                    reference="INV-2291",
+                ),
+            ),
+            has_more=False,
+            page_after=None,
         )
 
     def create_transfer(self, **kwargs):
