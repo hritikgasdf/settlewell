@@ -21,7 +21,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 17. Approver ≠ proposer and two demo identities — in review. Self-approval is rejected. https://github.com/hritikgasdf/settlewell/pull/12
 18. STOP_DUPLICATE cancel of a scheduled duplicate — in review. Scheduled duplicate cancels with no ledger impact; update_unsupported is re-read. https://github.com/hritikgasdf/settlewell/pull/13
 19. REPLACE lock, request_id, and duplicate_request_id handling — in review. Concurrent replace makes one transfer. https://github.com/hritikgasdf/settlewell/pull/14
-20. One replacement per failure, unknown outcome stays IN_FLIGHT, 6-day rule — not started. No PR.
+20. One replacement per failure, unknown outcome stays IN_FLIGHT, 6-day rule — in review. A second replacement is refused, and a timeout does not create attempt 2. https://github.com/hritikgasdf/settlewell/pull/15
 21. Replacement tool input is obligation_id + incident_ref only — not started. No PR.
 22. N1 refund-confirmed replacement — not started. No PR.
 23. Bank-change gate and new beneficiary — not started. No PR.
