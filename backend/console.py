@@ -15,6 +15,7 @@ from backend.ledger import (
     lock_fx_quote,
     migrate,
 )
+from backend.outbox import draft_reply, outbox_rows
 from backend.policy import decide
 from backend.reconcile import timeline
 from settlewell.flags import mock_mode
@@ -46,6 +47,8 @@ def render(path: str, conn=None) -> str:
         page = _inbox(conn)
     elif path == "/ledger":
         page = _ledger(conn)
+    elif path == "/outbox":
+        page = _outbox(conn)
     elif path.startswith("/incidents/"):
         page = _incident(conn, path.removeprefix("/incidents/"))
     else:
@@ -75,7 +78,7 @@ def seed_console(conn) -> None:
         source="onboarding",
     )
     late = _obligation(conn, supplier_id, "INV-2291", "awx-late", "SENT", "2026-11-04")
-    _beat(
+    incident_id, approval_id = _beat(
         conn,
         late,
         claim="console:1",
@@ -83,6 +86,13 @@ def seed_console(conn) -> None:
         status="SENT",
         evidence="dispatch_date 2026-11-04 is after transfer_date 2026-11-03",
         action="SEND_REPLY",
+    )
+    draft_reply(
+        conn,
+        incident_id=incident_id,
+        approval_id=approval_id,
+        body="The payment is still on its way.",
+        created_at=SEEN,
     )
     duplicate = insert_external_transfer(
         conn,
@@ -180,7 +190,7 @@ def _beat(
     evidence: str,
     action: str,
     duplicate: bool = False,
-) -> None:
+) -> tuple[int, int]:
     incident = conn.execute(
         "INSERT INTO incident (obligation_id, claim_json, state) VALUES (?, ?, ?)",
         (obligation_id, claim, state),
@@ -201,7 +211,7 @@ def _beat(
     )
     append_audit(conn, incident_id=incident_id, kind="evidence", detail=evidence, created_at=SEEN)
     append_audit(conn, incident_id=incident_id, kind="opened", detail=claim, created_at=SEEN)
-    propose(
+    approval_id = propose(
         conn,
         incident_id,
         ApprovalTerms(
@@ -213,6 +223,7 @@ def _beat(
         ),
         proposer=AP_CLERK,
     )
+    return incident_id, approval_id
 
 
 def _seed_result(conn) -> None:
@@ -274,10 +285,21 @@ def _inbox(conn) -> str:
         text = f"{label} · {row['invoice_ref']} · {row['proposed_action']}"
         items.append(f'<li><a href="{escape(href)}">{escape(text)}</a></li>')
     body = (
-        '<p><a href="/ledger">Money ledger</a></p>'
+        '<p><a href="/ledger">Money ledger</a> · <a href="/outbox">Outbox</a></p>'
         f'<ul class="inbox">{"".join(items)}</ul>'
     )
     return _layout("Inbox", body)
+
+
+def _outbox(conn) -> str:
+    items = []
+    for row in outbox_rows(conn):
+        items.append(
+            f'<li><p class="state">{escape(row["state"])}</p>'
+            f'<p class="body">{escape(row["body"])}</p></li>'
+        )
+    body = f'<p><a href="/">Inbox</a></p><h1>Outbox</h1><ul id="outbox">{"".join(items)}</ul>'
+    return _layout("Outbox", body)
 
 
 def _ledger(conn) -> str:
