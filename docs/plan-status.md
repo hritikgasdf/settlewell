@@ -40,7 +40,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 36. Offline mock mode that replays the hero — in review. The hero runs offline, labelled MOCK, with a fidelity table. https://github.com/hritikgasdf/settlewell/pull/31
 37. README with setup, reference credit, baseline table, and honest limits — in review. Setup, the kit 3 credit line, the no-LLM baseline table, and the open limits. https://github.com/hritikgasdf/settlewell/pull/32
 38. Code readability pass — in review. Eval cases 24–29 report rule ids, and the README table matches. https://github.com/hritikgasdf/settlewell/pull/33
-39. Feature freeze — not started. No PR.
+39. Feature freeze — in review. No new actions, incidents, or console pages after this line. https://github.com/hritikgasdf/settlewell/pull/35
 40. Rehearse the hero twice on the sandbox — not started. No PR.
 41. Rough-cut video and side clips — not started. No PR.
 42. Writeup outline and draft — not started. No PR.
