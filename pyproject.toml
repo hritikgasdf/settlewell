@@ -11,6 +11,7 @@ default-groups = ["dev"]
 
 [dependency-groups]
 dev = [
+  "hypothesis>=6.170.14",
   "pytest>=8.3.3",
   "ruff>=0.7.4",
 ]
@@ -27,3 +28,7 @@ markers = [
 target-version = "py312"
 line-length = 100
 src = ["."]
+
+[tool.hypothesis]
+derandomize = true
+max_examples = 20
