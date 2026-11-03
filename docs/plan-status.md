@@ -1,6 +1,6 @@
 # Plan status
 
-Build-plan checklist §5, one line each. Items 8–45 are not started; section B has not landed.
+Build-plan checklist §5, one line each. Item 8 is in an open PR. Items 9–45 are not started.
 
 1. Claim Claude credits — done (Hritik). No PR.
 2. Private repo and .gitignore — done. Merged https://github.com/hritikgasdf/settlewell/pull/1
@@ -9,7 +9,7 @@ Build-plan checklist §5, one line each. Items 8–45 are not started; section B
 5. Gmail filter for sandbox mail — not started (optional). No PR.
 6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. This PR wires Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`). Still open: loading `.env`, Node 20, and the LLM key. https://github.com/hritikgasdf/settlewell/pull/2
 7. Sandbox smoke (login, then balances) — done. Login 201, balances 200. No PR.
-8. Airwallex adapter — not started. No PR.
+8. Airwallex adapter — done. Token cache, re-login on 401, pinned `2025-11-11`, 5 requests/second, 429 backoff, typed calls for transfers, beneficiaries, letters, balances, and FX. https://github.com/hritikgasdf/settlewell/pull/3
 9. Sandbox driver and contract check — not started. No PR.
 10. Data model and ledger — not started. No PR.
 11. Poller, PAYOUT_REVERSAL join, and account-wide transfer index — not started. No PR.
