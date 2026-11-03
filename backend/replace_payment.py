@@ -40,6 +40,8 @@ def replace_payment(
     transfer_method: str,
     reason: str,
     as_of: str | None = None,
+    transfer_amount: Decimal | None = None,
+    transfer_currency: str | None = None,
 ) -> str:
     """Create at most one transfer for this attempt. Amount and currency come from the obligation."""
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
@@ -60,6 +62,8 @@ def replace_payment(
         if existing is not None:
             conn.rollback()
             raise ReplaceError("in_flight")
+        amount = transfer_amount if transfer_amount is not None else Decimal(obligation["amount"])
+        currency = transfer_currency or obligation["currency"]
         remote = _create_or_find(
             client,
             obligation,
@@ -67,8 +71,18 @@ def replace_payment(
             beneficiary_id=beneficiary_id,
             transfer_method=transfer_method,
             reason=reason,
+            amount=amount,
+            currency=currency,
         )
-        _store(conn, obligation, remote, request_id=request_id, details_hash=details_hash)
+        _store(
+            conn,
+            obligation,
+            remote,
+            request_id=request_id,
+            details_hash=details_hash,
+            amount=format(amount, "f"),
+            currency=currency,
+        )
         conn.commit()
     except ReplaceError as error:
         if error.code == "unknown":
@@ -95,12 +109,22 @@ def replace_payment(
     return str(remote.id)
 
 
-def _create_or_find(client, obligation, *, request_id, beneficiary_id, transfer_method, reason):
+def _create_or_find(
+    client,
+    obligation,
+    *,
+    request_id,
+    beneficiary_id,
+    transfer_method,
+    reason,
+    amount: Decimal,
+    currency: str,
+):
     try:
         return client.create_transfer(
-            transfer_amount=Decimal(obligation["amount"]),
-            transfer_currency=obligation["currency"],
-            source_currency=obligation["currency"],
+            transfer_amount=amount,
+            transfer_currency=currency,
+            source_currency=currency,
             beneficiary_id=beneficiary_id,
             transfer_method=transfer_method,
             reference=obligation["invoice_ref"],
@@ -182,7 +206,7 @@ def _mark(conn, obligation, request_id: str, details_hash: str, *, status: str, 
     )
 
 
-def _store(conn, obligation, remote, *, request_id, details_hash) -> None:
+def _store(conn, obligation, remote, *, request_id, details_hash, amount: str, currency: str) -> None:
     if _by_request_id(conn, request_id) is not None:
         return
     conn.execute(
@@ -197,8 +221,8 @@ def _store(conn, obligation, remote, *, request_id, details_hash) -> None:
             request_id,
             obligation["id"],
             details_hash,
-            obligation["amount"],
-            obligation["currency"],
+            amount,
+            currency,
             remote.status,
             obligation["invoice_ref"],
         ),
