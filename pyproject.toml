@@ -1,0 +1,29 @@
+[project]
+name = "settlewell"
+version = "0.0.1"
+description = "Payment-ops incident commander for the Airwallex Agentic Banking Hackathon"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.3",
+  "ruff>=0.7.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q -m 'not sandbox'"
+markers = [
+  "sandbox: live Airwallex sandbox calls; excluded from the default unit run",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["."]

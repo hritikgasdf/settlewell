@@ -1,0 +1,15 @@
+---
+description: Airwallex adapter constraints when editing the sandbox client
+globs: backend/airwallex/**/*.py,backend/**/adapter.py,backend/**/*airwallex*.py
+alwaysApply: false
+---
+
+# Airwallex adapter
+
+- Login is `POST /api/v1/authentication/login` with `x-client-id` and `x-api-key`. Base URL `https://api-demo.airwallex.com`.
+- Send `x-api-version: 2025-11-11` on every request from one place. Cache the token and re-login on 401.
+- `failure_reason` on a CANCELLED transfer is kept only when that version header is set. With no header, GET returns null. Classify on the code in `failure_reason`, not `failure_type` (the sandbox reports `INCORRECT_ROUTING` for both a bank return and a recall). `2026-06-30` replaces the flat fields with a `failure` object.
+- Throttle to at most 5 requests per second and back off on 429 `too_many_requests`.
+- Return typed results. Do not hand-build auth or version headers at call sites.
+- Simulation calls belong in the sandbox driver, not here.
+- Never log the client id, API key, bearer token, webhook secret, or `Authorization` header.

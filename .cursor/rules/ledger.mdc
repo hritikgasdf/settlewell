@@ -1,0 +1,13 @@
+---
+description: Ledger rules when editing obligation, beneficiary, and transfer records
+globs: backend/ledger/**/*.py,backend/**/ledger*.py
+alwaysApply: false
+---
+
+# Ledger
+
+- Append-only: bank-detail versions, status snapshots, and the audit log. New bank details are a new beneficiary and a new version. An in-place beneficiary update overwrites history.
+- One live transfer per obligation. A second live payment for the same supplier, amount, and reference is its own incident, including an untagged look-alike.
+- Store `failure_reason` from a pinned-version response or the `failed` webhook. A later GET without `x-api-version: 2025-11-11` returns null and must not wipe the stored reason.
+- On a bank return the sandbox sends `paid` before `failed`, and events arrive out of order. Do not mark the obligation paid from arrival order. `paid` stays provisional until a settle window or a GET confirms PAID; a later `failed` wins.
+- Never log secrets. Transfer ids and statuses are fine.
