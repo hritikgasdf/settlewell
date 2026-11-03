@@ -65,15 +65,17 @@ def main() -> int:
     if not mock_mode():
         print("eval skipped")
         return 0
-    results = run_first_15()
+    from backend.eval_rest import run_remaining_15
+
+    results = run_first_15() + run_remaining_15()
     passed = 0
     for result in results:
         ok = result.passed and result.invariants_passed
         passed += int(ok)
         mark = "pass" if ok else "fail"
         print(f"{result.number} {result.name} {mark} {result.action} {result.rule_id}")
-    print(f"{passed}/15")
-    return 0 if passed == 15 else 1
+    print(f"{passed}/30")
+    return 0 if passed == 30 else 1
 
 
 def _score(case: dict) -> EvalResult:
@@ -320,24 +322,32 @@ class _Pay:
         timeout: bool = False,
         colleague: Transfer | None = None,
         airwallex_id: str = "awx-original",
+        remote_status: str = "CANCELLED",
+        reversal: bool = True,
+        fee_amount: Decimal = Decimal(0),
     ) -> None:
         self.timeout = timeout
         self.colleague = colleague
         self.airwallex_id = airwallex_id
+        self.remote_status = remote_status
+        self.reversal = reversal
+        self.fee_amount = fee_amount
         self.created: list[str] = []
 
     def get_transfer(self, transfer_id: str) -> Transfer:
         return Transfer(
             id=transfer_id,
-            status="CANCELLED",
+            status=self.remote_status,
             transfer_amount=Decimal("100.00"),
             transfer_currency="EUR",
             transfer_method="SWIFT",
-            fee_amount=Decimal(0),
+            fee_amount=self.fee_amount,
             reference="INV",
         )
 
     def balance_history(self, **_kwargs) -> BalanceHistoryPage:
+        if not self.reversal:
+            return BalanceHistoryPage(items=(), has_more=False, page_after=None)
         return BalanceHistoryPage(
             items=(
                 BalanceHistoryItem(
