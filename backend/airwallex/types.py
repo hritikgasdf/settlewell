@@ -84,6 +84,7 @@ class CancelResult:
 @dataclass(frozen=True)
 class BeneficiaryValidation:
     ok: bool
+    field_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

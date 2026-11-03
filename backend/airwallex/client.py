@@ -45,10 +45,17 @@ Sleeper = Callable[[float], None]
 
 
 class AirwallexError(Exception):
-    def __init__(self, status_code: int, code: str | None, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str | None,
+        message: str,
+        field_codes: tuple[str, ...] = (),
+    ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.field_codes = field_codes
         super().__init__(f"HTTP {status_code} {code or ''}".rstrip())
 
 
@@ -185,7 +192,12 @@ class AirwallexClient:
         return CancelResult(ok=True, transfer=None)
 
     def validate_beneficiary(self, body: Mapping) -> BeneficiaryValidation:
-        payload = self._json("POST", "/api/v1/beneficiaries/validate", json_body=dict(body))
+        try:
+            payload = self._json("POST", "/api/v1/beneficiaries/validate", json_body=dict(body))
+        except AirwallexError as error:
+            if error.code == "validation_failed":
+                return BeneficiaryValidation(ok=False, field_codes=error.field_codes)
+            raise
         return BeneficiaryValidation(ok=payload == "OK" or payload is True)
 
     def create_beneficiary(self, body: Mapping) -> Beneficiary:
@@ -353,6 +365,7 @@ class AirwallexClient:
     def _error(self, response: HttpResponse) -> AirwallexError:
         code = None
         message = ""
+        field_codes: tuple[str, ...] = ()
         try:
             payload = json.loads(response.body.decode() or "null")
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -362,7 +375,8 @@ class AirwallexClient:
             code = raw_code if isinstance(raw_code, str) else None
             raw_message = payload.get("message")
             message = raw_message if isinstance(raw_message, str) else ""
-        return AirwallexError(response.status, code, message)
+            field_codes = _field_codes(payload.get("details"))
+        return AirwallexError(response.status, code, message, field_codes)
 
 
 def _json_default(value):
@@ -391,6 +405,15 @@ def _parse_expiry(value, now: float) -> float:
 
 def _path_id(value: str) -> str:
     return urllib.parse.quote(value, safe="")
+
+
+def _field_codes(details) -> tuple[str, ...]:
+    if not isinstance(details, dict):
+        return ()
+    errors = details.get("errors")
+    if not isinstance(errors, list):
+        return ()
+    return tuple(str(item["code"]) for item in errors if isinstance(item, dict) and item.get("code") is not None)
 
 
 def _optional_str(value) -> str | None:
