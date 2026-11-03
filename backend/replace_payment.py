@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from backend.airwallex.client import AirwallexError
+from backend.ledger import set_obligation_status
+
+_DEFINITIVE_REFUSAL = frozenset(
+    {"insufficient_funds", "validation_failed", "amount_above_limit", "limit_exceeded"}
+)
+_MAX_ATTEMPTS = 3
+_DEDUPE_MARGIN = timedelta(days=6)
 
 
 class ReplaceError(Exception):
@@ -31,18 +39,27 @@ def replace_payment(
     details_hash: str,
     transfer_method: str,
     reason: str,
+    as_of: str | None = None,
 ) -> str:
     """Create at most one transfer for this attempt. Amount and currency come from the obligation."""
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
     if obligation is None:
         raise ReplaceError("missing")
+    if attempt > _MAX_ATTEMPTS:
+        raise ReplaceError("max_attempts")
+    if _past_dedupe_margin(conn, obligation_id, as_of):
+        raise ReplaceError("too_late")
+    _require_prior_refusal(conn, obligation["invoice_ref"], attempt)
     request_id = replacement_request_id(obligation["invoice_ref"], attempt)
     conn.execute("BEGIN IMMEDIATE")
     try:
         existing = _by_request_id(conn, request_id)
-        if existing is not None:
+        if existing is not None and existing["airwallex_id"]:
             conn.commit()
             return str(existing["airwallex_id"])
+        if existing is not None:
+            conn.rollback()
+            raise ReplaceError("in_flight")
         remote = _create_or_find(
             client,
             obligation,
@@ -53,9 +70,28 @@ def replace_payment(
         )
         _store(conn, obligation, remote, request_id=request_id, details_hash=details_hash)
         conn.commit()
+    except ReplaceError as error:
+        if error.code == "unknown":
+            _mark(conn, obligation, request_id, details_hash, status="IN_FLIGHT", failure_code=None)
+            set_obligation_status(conn, obligation_id, "IN_FLIGHT")
+            conn.commit()
+        else:
+            conn.rollback()
+        raise
+    except AirwallexError as error:
+        if error.code in _DEFINITIVE_REFUSAL:
+            _mark(conn, obligation, request_id, details_hash, status="REFUSED", failure_code=error.code)
+            conn.commit()
+            raise ReplaceError("refused") from error
+        conn.rollback()
+        raise
     except Exception:
         conn.rollback()
         raise
+    if remote.status in {"FAILED", "CANCELLED"}:
+        set_obligation_status(conn, obligation_id, "IN_FLIGHT")
+        conn.commit()
+        raise ReplaceError("person")
     return str(remote.id)
 
 
@@ -70,7 +106,7 @@ def _create_or_find(client, obligation, *, request_id, beneficiary_id, transfer_
             reference=obligation["invoice_ref"],
             reason=reason,
             request_id=request_id,
-            metadata={"obligation_id": obligation["invoice_ref"]},
+            metadata={"obligation_id": str(obligation["id"])},
         )
     except AirwallexError as error:
         if error.code != "duplicate_request_id":
@@ -87,11 +123,63 @@ def _lookup(client, request_id: str):
     return page.items[0]
 
 
+def _require_prior_refusal(conn, invoice_ref: str, attempt: int) -> None:
+    if attempt <= 1:
+        return
+    previous = _by_request_id(conn, replacement_request_id(invoice_ref, attempt - 1))
+    if previous is None or previous["status"] != "REFUSED":
+        raise ReplaceError("refused_sequence")
+
+
+def _past_dedupe_margin(conn, obligation_id: int, as_of: str | None) -> bool:
+    if as_of is None:
+        return False
+    row = conn.execute(
+        """
+        SELECT snapshot.seen_at
+        FROM status_snapshot AS snapshot
+        JOIN transfer_record ON transfer_record.id = snapshot.transfer_record_id
+        WHERE transfer_record.obligation_id = ?
+        ORDER BY snapshot.seen_at DESC
+        LIMIT 1
+        """,
+        (obligation_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    failed_on = datetime.fromisoformat(row["seen_at"])
+    now = datetime.fromisoformat(as_of)
+    return now - failed_on > _DEDUPE_MARGIN
+
+
 def _by_request_id(conn, request_id: str):
     return conn.execute(
-        "SELECT airwallex_id FROM transfer_record WHERE request_id = ?",
+        "SELECT airwallex_id, status FROM transfer_record WHERE request_id = ?",
         (request_id,),
     ).fetchone()
+
+
+def _mark(conn, obligation, request_id: str, details_hash: str, *, status: str, failure_code: str | None) -> None:
+    if _by_request_id(conn, request_id) is not None:
+        return
+    conn.execute(
+        """
+        INSERT INTO transfer_record (
+            request_id, obligation_id, origin, details_hash, amount, currency,
+            status, failure_code, reference
+        ) VALUES (?, ?, 'settlewell', ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            request_id,
+            obligation["id"],
+            details_hash,
+            obligation["amount"],
+            obligation["currency"],
+            status,
+            failure_code,
+            obligation["invoice_ref"],
+        ),
+    )
 
 
 def _store(conn, obligation, remote, *, request_id, details_hash) -> None:
