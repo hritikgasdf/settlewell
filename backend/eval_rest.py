@@ -145,6 +145,9 @@ def _fx_floor(_case: dict) -> tuple[str, str, bool, bool]:
         obligation_id=_obligation_id(over_conn, over_incident),
         as_of=_SEEN,
     )
+    funded = under.action == "converted" and over.action == "escalate"
+    if funded:
+        return "R-FX-FLOOR-CONVERT", "R-FX-LIMIT-ESCALATE", False, False
     return under.action, over.action, False, over.action == "converted"
 
 
@@ -168,8 +171,9 @@ def _webhook_order(_case: dict) -> tuple[str, str, bool, bool]:
     ).fetchone()
     obligation = conn.execute("SELECT status FROM obligation").fetchone()["status"]
     reason = status["failure_message"] or ""
-    if status["status"] == "CANCELLED" and reason.startswith("90802") and obligation != "PAID_ONCE":
-        return "CANCELLED", "90802", False, False
+    ordered = status["status"] == "CANCELLED" and reason.startswith("90802") and obligation != "PAID_ONCE"
+    if ordered:
+        return "CANCELLED", "R-WEBHOOK-ORDER", False, False
     return status["status"] or "ERROR", reason or "R-ORDER", False, False
 
 
@@ -190,7 +194,7 @@ def _bank_unattested(_case: dict) -> tuple[str, str, bool, bool]:
         )
     except BankChangeError as error:
         if error.code == "callback" and not client.created:
-            return "REJECT", error.code, False, False
+            return "REJECT", "R-BANK-CALLBACK-REQUIRED", False, False
         return "ERROR", error.code, False, bool(client.created)
     return "CREATED", "R-ERROR", False, bool(client.created)
 
@@ -280,7 +284,7 @@ def _quote_reuse(_case: dict) -> tuple[str, str, bool, bool]:
         as_of="2026-11-03T12:00:00+00:00",
     )
     if consumed and expired.outcome == "reapprove":
-        return "CONSUMED", expired.outcome, False, False
+        return "R-FX-QUOTE-CONSUMED", "R-FX-QUOTE-EXPIRED", False, False
     return "ERROR", expired.outcome, False, False
 
 

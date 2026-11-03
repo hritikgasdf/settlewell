@@ -33,6 +33,25 @@ def test_the_first_15_match_their_rule_and_action(monkeypatch, capsys):
         assert result.invariants_passed, result.number
 
 
+def test_cases_24_to_29_report_rule_ids(monkeypatch):
+    monkeypatch.setenv("SETTLEWELL_MOCK", "1")
+    by_number = {result.number: result for result in run_remaining_15()}
+    assert (by_number[24].action, by_number[24].rule_id) == (
+        "R-FX-FLOOR-CONVERT",
+        "R-FX-LIMIT-ESCALATE",
+    )
+    assert (by_number[25].action, by_number[25].rule_id) == ("CANCELLED", "R-WEBHOOK-ORDER")
+    assert (by_number[26].action, by_number[26].rule_id) == ("REJECT", "R-BANK-CALLBACK-REQUIRED")
+    assert by_number[27].rule_id == "R-BAD-JSON"
+    assert by_number[28].rule_id == "R-NO-MATCH"
+    assert (by_number[29].action, by_number[29].rule_id) == (
+        "R-FX-QUOTE-CONSUMED",
+        "R-FX-QUOTE-EXPIRED",
+    )
+    for number in range(24, 30):
+        assert by_number[number].passed
+
+
 def test_a_wrong_expected_rule_is_reported_as_fail(monkeypatch):
     monkeypatch.setenv("SETTLEWELL_MOCK", "1")
     case = dict(CASES[0])

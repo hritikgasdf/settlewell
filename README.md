@@ -64,15 +64,15 @@ Without the policy engine, every supplier email is handed to a person. That base
 | 21 | Replace while still sent | ESCALATE | WAIT | R-NO-REPLACE-IN-FLIGHT |
 | 22 | Proof after cancel | ESCALATE | REFUSE | R-CANCELLED-NO-CODE |
 | 23 | Fee is not refunded | ESCALATE | REPLACE_SAME | R-REPLACE_SAME-90802 |
-| 24 | Reserve floor and the FX limit | ESCALATE | converted | escalate |
-| 25 | Paid then failed out of order | ESCALATE | CANCELLED | 90802 |
-| 26 | Bank change without a call-back | ESCALATE | REJECT | callback |
+| 24 | Reserve floor and the FX limit | ESCALATE | R-FX-FLOOR-CONVERT | R-FX-LIMIT-ESCALATE |
+| 25 | Paid then failed out of order | ESCALATE | CANCELLED | R-WEBHOOK-ORDER |
+| 26 | Bank change without a call-back | ESCALATE | REJECT | R-BANK-CALLBACK-REQUIRED |
 | 27 | Valid JSON smuggles a payment | ESCALATE | ESCALATE | R-BAD-JSON |
 | 28 | Unknown supplier invoice | ESCALATE | ESCALATE | R-NO-MATCH |
-| 29 | Quote consumed and expired | ESCALATE | CONSUMED | reapprove |
+| 29 | Quote consumed and expired | ESCALATE | R-FX-QUOTE-CONSUMED | R-FX-QUOTE-EXPIRED |
 | 30 | Hero checks still hold | ESCALATE | PASS | R-HERO |
 
-Case 24 prints `converted` when the EUR top-up is under the limit and `escalate` when it is over the limit. Case 29 prints `CONSUMED` when a quote is used twice and `reapprove` when the quote has expired. Case 7 proposes new details and does not pay them until a call-back verifies a new beneficiary.
+Case 24 reports `R-FX-FLOOR-CONVERT` when the EUR top-up is under the limit and `R-FX-LIMIT-ESCALATE` when it is over the limit. Case 29 reports `R-FX-QUOTE-CONSUMED` when a quote is used twice and `R-FX-QUOTE-EXPIRED` when the quote has expired. Case 7 proposes new details and does not pay them until a call-back verifies a new beneficiary.
 
 ## Honest limits
 
