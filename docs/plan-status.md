@@ -16,7 +16,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 12. Policy engine v1 and failure-code tests — merged. One action and rule id per published failure code. No proof after CANCELLED, no replace in flight, stop duplicate only while SCHEDULED. https://github.com/hritikgasdf/settlewell/pull/7
 13. Claim parser and match to obligation — merged. Hero email matches INV-2291; bad JSON escalates. https://github.com/hritikgasdf/settlewell/pull/8
 14. Account-wide paid-once scan — in review. A colleague's SCHEDULED duplicate is its own incident. https://github.com/hritikgasdf/settlewell/pull/9
-15. WAIT, status-gated proof, ETA, and TRACE draft — not started. No PR.
+15. WAIT, status-gated proof, ETA, and TRACE draft — in review. Proof attached while SENT; refused after CANCELLED. https://github.com/hritikgasdf/settlewell/pull/10
 16. Approval service (bound hash, single use, void on change) — not started. No PR.
 17. Approver ≠ proposer and two demo identities — not started. No PR.
 18. STOP_DUPLICATE cancel of a scheduled duplicate — not started. No PR.
