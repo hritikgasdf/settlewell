@@ -323,6 +323,57 @@ def append_status_snapshot(
     return int(cursor.lastrowid)
 
 
+def set_transfer_status(
+    conn: sqlite3.Connection,
+    transfer_record_id: int,
+    *,
+    status: str,
+    dispatch_date: str | None,
+) -> None:
+    """Update status from a poll. Does not touch a stored failure reason."""
+    conn.execute(
+        """
+        UPDATE transfer_record
+        SET status = ?, dispatch_date = COALESCE(?, dispatch_date)
+        WHERE id = ?
+        """,
+        (status, dispatch_date, transfer_record_id),
+    )
+
+
+def set_obligation_status(conn: sqlite3.Connection, obligation_id: int, status: str) -> None:
+    conn.execute("UPDATE obligation SET status = ? WHERE id = ?", (status, obligation_id))
+
+
+def insert_external_transfer(
+    conn: sqlite3.Connection,
+    *,
+    airwallex_id: str,
+    request_id: str | None,
+    obligation_id: int,
+    amount: str,
+    currency: str,
+    status: str,
+    reference: str,
+) -> int | None:
+    """Tag an untagged look-alike. Returns None when that Airwallex id is already stored."""
+    existing = conn.execute(
+        "SELECT id FROM transfer_record WHERE airwallex_id = ?",
+        (airwallex_id,),
+    ).fetchone()
+    if existing:
+        return None
+    cursor = conn.execute(
+        """
+        INSERT INTO transfer_record (
+            airwallex_id, request_id, obligation_id, origin, amount, currency, status, reference
+        ) VALUES (?, ?, ?, 'external', ?, ?, ?, ?)
+        """,
+        (airwallex_id, request_id, obligation_id, amount, currency, status, reference),
+    )
+    return int(cursor.lastrowid)
+
+
 def remember_failure_reason(
     conn: sqlite3.Connection,
     transfer_record_id: int,

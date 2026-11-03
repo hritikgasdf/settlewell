@@ -124,6 +124,7 @@ class AirwallexClient:
         request_id: str | None = None,
         short_reference_id: str | None = None,
         page_size: int | None = None,
+        page: str | None = None,
     ) -> TransferPage:
         payload = self._json(
             "GET",
@@ -132,6 +133,7 @@ class AirwallexClient:
                 ("request_id", request_id),
                 ("short_reference_id", short_reference_id),
                 ("page_size", page_size),
+                ("page", page),
             ],
         )
         data = payload if isinstance(payload, dict) else {}
