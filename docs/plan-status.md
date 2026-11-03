@@ -1,6 +1,6 @@
 # Plan status
 
-Build-plan checklist §5, one line each. Items 8–12 are merged. Item 13 is in review. Items 14–45 are not started.
+Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in review. Items 15–45 are not started.
 
 1. Claim Claude credits — done (Hritik). No PR.
 2. Private repo and .gitignore — done. Merged https://github.com/hritikgasdf/settlewell/pull/1
@@ -14,8 +14,8 @@ Build-plan checklist §5, one line each. Items 8–12 are merged. Item 13 is in 
 10. Data model and ledger — merged. Seed creates Lumen Textiles GmbH, INV-2291, and its transfer. https://github.com/hritikgasdf/settlewell/pull/5
 11. Poller, PAYOUT_REVERSAL join, and account-wide transfer index — merged. Timeline builds from polling, reversal join by source, external look-alikes tagged. https://github.com/hritikgasdf/settlewell/pull/6
 12. Policy engine v1 and failure-code tests — merged. One action and rule id per published failure code. No proof after CANCELLED, no replace in flight, stop duplicate only while SCHEDULED. https://github.com/hritikgasdf/settlewell/pull/7
-13. Claim parser and match to obligation — in review. Hero email matches INV-2291; bad JSON escalates. https://github.com/hritikgasdf/settlewell/pull/8
-14. Account-wide paid-once scan — not started. No PR.
+13. Claim parser and match to obligation — merged. Hero email matches INV-2291; bad JSON escalates. https://github.com/hritikgasdf/settlewell/pull/8
+14. Account-wide paid-once scan — in review. A colleague's SCHEDULED duplicate is its own incident. https://github.com/hritikgasdf/settlewell/pull/9
 15. WAIT, status-gated proof, ETA, and TRACE draft — not started. No PR.
 16. Approval service (bound hash, single use, void on change) — not started. No PR.
 17. Approver ≠ proposer and two demo identities — not started. No PR.
