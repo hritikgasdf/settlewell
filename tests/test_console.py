@@ -54,3 +54,21 @@ def test_inbox_links_open_timeline_decision_approval_and_audit(monkeypatch):
     joined = inbox + "".join(pages)
     assert "AIRWALLEX" not in joined
     assert "whsec" not in joined
+    assert 'href="/ledger"' in inbox
+
+    ledger = render("/ledger", conn)
+    assert "paid once" in ledger
+    assert "Incident cost €13.47" in ledger
+    assert "€800.00" in ledger
+    assert "€5200.00" in ledger
+    assert "USD/EUR" in ledger
+    assert 'id="eval-strip"' in ledger
+    assert "paid once" in ledger
+    conn.execute(
+        "UPDATE balance_snapshot SET available = ? WHERE currency = 'EUR' AND label = 'before'",
+        ("1<script>",),
+    )
+    conn.commit()
+    escaped = render("/ledger", conn)
+    assert "1&lt;script&gt;" in escaped
+    assert "<script>" not in escaped

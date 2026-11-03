@@ -12,6 +12,7 @@ from backend.ledger import (
     append_status_snapshot,
     connect,
     insert_external_transfer,
+    lock_fx_quote,
     migrate,
 )
 from backend.policy import decide
@@ -43,6 +44,8 @@ def render(path: str, conn=None) -> str:
     seed_console(conn)
     if path in ("/", "/inbox"):
         page = _inbox(conn)
+    elif path == "/ledger":
+        page = _ledger(conn)
     elif path.startswith("/incidents/"):
         page = _incident(conn, path.removeprefix("/incidents/"))
     else:
@@ -130,6 +133,7 @@ def seed_console(conn) -> None:
         evidence="status PAID, no replace",
         action="SEND_REPLY",
     )
+    _seed_result(conn)
     conn.commit()
 
 
@@ -211,6 +215,47 @@ def _beat(
     )
 
 
+def _seed_result(conn) -> None:
+    """Closing books for the hero: paid once, the lost fee, balances, and the FX quote."""
+    conn.execute("UPDATE transfer_record SET fee = '13.47' WHERE airwallex_id = 'awx-late'")
+    conn.execute("UPDATE transfer_record SET fee = '0.00' WHERE airwallex_id = 'awx-dup'")
+    conn.execute("UPDATE obligation SET status = 'PAID_ONCE' WHERE invoice_ref = 'INV-2291'")
+    for currency, available, label in (
+        ("EUR", "800.00", "before"),
+        ("USD", "100000.00", "before"),
+        ("EUR", "5200.00", "after"),
+        ("USD", "95160.00", "after"),
+    ):
+        conn.execute(
+            """
+            INSERT INTO balance_snapshot (currency, available, taken_at, label)
+            VALUES (?, ?, ?, ?)
+            """,
+            (currency, available, SEEN, label),
+        )
+    lock_fx_quote(
+        conn,
+        quote_id="quo_hero",
+        pair="USD/EUR",
+        rate="1.10",
+        amount="4400.00",
+        valid_to="2026-11-03T12:15:00+00:00",
+    )
+    case = conn.execute(
+        """
+        INSERT INTO eval_case (name, fixture_json, expected_decision)
+        VALUES ('hero-result', '{}', 'paid once')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO eval_run (case_id, invariant_results, created_at)
+        VALUES (?, 'paid once', ?)
+        """,
+        (case.lastrowid, SEEN),
+    )
+
+
 def _inbox(conn) -> str:
     rows = conn.execute(
         """
@@ -228,8 +273,85 @@ def _inbox(conn) -> str:
         href = f"/incidents/{row['id']}"
         text = f"{label} · {row['invoice_ref']} · {row['proposed_action']}"
         items.append(f'<li><a href="{escape(href)}">{escape(text)}</a></li>')
-    body = f'<ul class="inbox">{"".join(items)}</ul>'
+    body = (
+        '<p><a href="/ledger">Money ledger</a></p>'
+        f'<ul class="inbox">{"".join(items)}</ul>'
+    )
     return _layout("Inbox", body)
+
+
+def _ledger(conn) -> str:
+    paid = conn.execute(
+        "SELECT invoice_ref, status FROM obligation WHERE status = 'PAID_ONCE' ORDER BY id"
+    ).fetchall()
+    fees = conn.execute(
+        """
+        SELECT airwallex_id, currency, fee FROM transfer_record
+        WHERE fee IS NOT NULL ORDER BY id
+        """
+    ).fetchall()
+    balances = conn.execute(
+        "SELECT currency, available, label FROM balance_snapshot ORDER BY id"
+    ).fetchall()
+    quote = conn.execute(
+        "SELECT quote_id, pair, rate, amount, state FROM fx_quote ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    runs = conn.execute(
+        "SELECT invariant_results FROM eval_run ORDER BY id"
+    ).fetchall()
+    paid_html = "".join(
+        f"<li>{escape(row['invoice_ref'])} {escape(row['status'].replace('_', ' ').lower())}</li>"
+        for row in paid
+    )
+    fee_html = "".join(
+        f"<li>{escape(row['airwallex_id'])} · {_money(row['currency'], row['fee'])}</li>"
+        for row in fees
+    )
+    balance_html = "".join(
+        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+            escape(row["label"]),
+            escape(row["currency"]),
+            _money(row["currency"], row["available"]),
+        )
+        for row in balances
+    )
+    if quote is None:
+        fx_html = "<p>No quote.</p>"
+    else:
+        fx_html = (
+            f"<p>{escape(quote['pair'])} · rate {escape(quote['rate'])} · "
+            f"buy {escape(quote['amount'])} · {escape(quote['quote_id'])} · {escape(quote['state'])}</p>"
+        )
+    hero_fee = next((row["fee"] for row in fees if row["fee"] == "13.47"), None)
+    cost = _money("EUR", hero_fee) if hero_fee else ""
+    strip = "".join(f"<li>{escape(row['invariant_results'])}</li>" for row in runs)
+    body = f"""
+    <p><a href="/">Inbox</a></p>
+    <h1>Money ledger</h1>
+    <section id="result">
+      <h2>Result</h2>
+      <ul class="paid-once">{paid_html}</ul>
+      <p class="incident-cost">Incident cost {cost}</p>
+    </section>
+    <section id="balances">
+      <h2>Balances</h2>
+      <table><tbody>{balance_html}</tbody></table>
+    </section>
+    <section id="fees"><h2>Fees</h2><ul>{fee_html}</ul></section>
+    <section id="fx"><h2>FX</h2>{fx_html}</section>
+    <section id="eval-strip"><h2>Eval</h2><ul>{strip}</ul></section>
+    """
+    return _layout("Money ledger", body)
+
+
+def _money(currency: str, amount: str) -> str:
+    if currency == "EUR":
+        shown = f"€{amount}"
+    elif currency == "USD":
+        shown = f"${amount}"
+    else:
+        shown = f"{currency} {amount}"
+    return escape(shown)
 
 
 def _incident(conn, raw_id: str) -> str:
@@ -297,7 +419,9 @@ def _layout(title: str, body: str) -> str:
 body {{ font-family: Georgia, serif; margin: 2rem auto; max-width: 40rem; color: #1c1917; }}
 a {{ color: #9a3412; }}
 section {{ border-top: 1px solid #e7e5e4; margin-top: 1.5rem; padding-top: 0.5rem; }}
-.rule-id {{ font-family: ui-monospace, monospace; }}
+table {{ border-collapse: collapse; width: 100%; }}
+td {{ padding: 0.2rem 0.75rem 0.2rem 0; font-variant-numeric: tabular-nums; }}
+.rule-id, .incident-cost {{ font-family: ui-monospace, monospace; }}
 </style>
 </head>
 <body>
