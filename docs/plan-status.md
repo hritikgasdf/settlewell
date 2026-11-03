@@ -7,7 +7,7 @@ Build-plan checklist §5, one line each. Items 8–45 are not started; section B
 3. Airwallex Docs MCP — done. https://github.com/hritikgasdf/settlewell/pull/1
 4. Block calendar through Sun 15 Nov — not started (Hritik's). No PR.
 5. Gmail filter for sandbox mail — not started (optional). No PR.
-6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. This PR wires Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`). Still open: loading `.env`, Node 20, and the LLM key. PULL_REQUEST_URL
+6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. This PR wires Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`). Still open: loading `.env`, Node 20, and the LLM key. https://github.com/hritikgasdf/settlewell/pull/2
 7. Sandbox smoke (login, then balances) — done. Login 201, balances 200. No PR.
 8. Airwallex adapter — not started. No PR.
 9. Sandbox driver and contract check — not started. No PR.
