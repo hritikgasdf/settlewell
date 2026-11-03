@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+
+AP_CLERK = "ap-clerk"
+FINANCE_APPROVER = "finance-approver"
+DEMO_IDENTITIES = (AP_CLERK, FINANCE_APPROVER)
 
 
 class ApprovalError(Exception):
@@ -39,19 +44,34 @@ def binding_hash(terms: ApprovalTerms) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def propose(conn, incident_id: int, terms: ApprovalTerms, *, expires_at: str | None = None) -> int:
+def propose(
+    conn,
+    incident_id: int,
+    terms: ApprovalTerms,
+    *,
+    proposer: str,
+    expires_at: str | None = None,
+) -> int:
     cursor = conn.execute(
         """
-        INSERT INTO approval (incident_id, action, binding_hash, expires_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO approval (incident_id, action, binding_hash, expires_at, proposer)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (incident_id, terms.action, binding_hash(terms), expires_at),
+        (incident_id, terms.action, binding_hash(terms), expires_at, proposer),
     )
     conn.commit()
     return int(cursor.lastrowid)
 
 
-def approve(conn, approval_id: int, terms: ApprovalTerms, *, approver: str, used_at: str) -> None:
+def approve(
+    conn,
+    approval_id: int,
+    terms: ApprovalTerms,
+    *,
+    approver: str,
+    used_at: str,
+    before_update: Callable[[], None] | None = None,
+) -> None:
     row = conn.execute("SELECT * FROM approval WHERE id = ?", (approval_id,)).fetchone()
     if row is None:
         raise ApprovalError("missing")
@@ -59,8 +79,14 @@ def approve(conn, approval_id: int, terms: ApprovalTerms, *, approver: str, used
         raise ApprovalError("used")
     if terms.action != row["action"] or binding_hash(terms) != row["binding_hash"]:
         raise ApprovalError("void")
-    conn.execute(
+    if approver == row["proposer"]:
+        raise ApprovalError("self")
+    if before_update is not None:
+        before_update()
+    cursor = conn.execute(
         "UPDATE approval SET used_at = ?, approver = ? WHERE id = ? AND used_at IS NULL",
         (used_at, approver, approval_id),
     )
+    if cursor.rowcount == 0:
+        raise ApprovalError("used")
     conn.commit()
