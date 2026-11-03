@@ -29,7 +29,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 25. FxQuote single-use and expiry check — in review. Reused quote rejected as consumed; expired quote is replaced and approved again. https://github.com/hritikgasdf/settlewell/pull/20
 26. N2 colleague already re-paid — in review. No replacement when a colleague already paid the invoice. https://github.com/hritikgasdf/settlewell/pull/21
 27. Webhook receiver (HMAC, dedupe, ordering, paid settle window) — in review. Out-of-order and replayed events leave the correct state. https://github.com/hritikgasdf/settlewell/pull/22
-28. Console skeleton — not started. No PR.
+28. Console skeleton — in review. Inbox links open the timeline, decision, approval, and audit for beats 1–4. https://github.com/hritikgasdf/settlewell/pull/23
 29. Money ledger screen — not started. No PR.
 30. Visible outbox — not started. No PR.
 31. Eval harness, first 15 incidents — not started. No PR.
