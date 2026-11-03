@@ -135,6 +135,13 @@ CREATE TABLE IF NOT EXISTS eval_run (
     invariant_results TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outbox_message (
+    id INTEGER PRIMARY KEY,
+    incident_id INTEGER NOT NULL REFERENCES incident(id),
+    approval_id INTEGER NOT NULL REFERENCES approval(id),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 HERO_SUPPLIER = "Lumen Textiles GmbH"
@@ -158,6 +165,7 @@ MODEL_TABLES = frozenset(
         "audit_event",
         "eval_case",
         "eval_run",
+        "outbox_message",
     }
 )
 
