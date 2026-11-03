@@ -474,3 +474,16 @@ def consume_fx_quote(conn: sqlite3.Connection, quote_id: str, conversion_id: str
         "UPDATE fx_quote SET state = 'CONSUMED', consumed_by = ? WHERE quote_id = ?",
         (conversion_id, quote_id),
     )
+
+
+def expire_fx_quote(conn: sqlite3.Connection, quote_id: str) -> None:
+    """A consumed quote stays consumed. A locked quote can be marked expired."""
+    row = conn.execute("SELECT state FROM fx_quote WHERE quote_id = ?", (quote_id,)).fetchone()
+    if row is None or row["state"] == "CONSUMED":
+        raise LedgerError("quote is not available")
+    if row["state"] == "EXPIRED":
+        return
+    conn.execute(
+        "UPDATE fx_quote SET state = 'EXPIRED' WHERE quote_id = ? AND state = 'LOCKED'",
+        (quote_id,),
+    )
