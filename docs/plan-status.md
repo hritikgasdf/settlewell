@@ -1,6 +1,6 @@
 # Plan status
 
-Build-plan checklist §5, one line each. Item 8 is merged. Item 9 is in an open PR. Items 10–45 are not started.
+Build-plan checklist §5, one line each. Items 8 and 9 are merged. Item 10 is in an open PR. Items 11–45 are not started.
 
 1. Claim Claude credits — done (Hritik). No PR.
 2. Private repo and .gitignore — done. Merged https://github.com/hritikgasdf/settlewell/pull/1
@@ -10,8 +10,8 @@ Build-plan checklist §5, one line each. Item 8 is merged. Item 9 is in an open 
 6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`) is merged in https://github.com/hritikgasdf/settlewell/pull/2. Still open: loading `.env`, Node 20, and the LLM key.
 7. Sandbox smoke (login, then balances) — done. Login 201, balances 200. No PR.
 8. Airwallex adapter — merged. Token cache, re-login on 401, pinned `2025-11-11`, 5 requests/second, 429 backoff, typed calls for transfers, beneficiaries, letters, balances, and FX. https://github.com/hritikgasdf/settlewell/pull/3
-9. Sandbox driver and contract check — done. Create, SENT, FAILED 90701, CANCELLED on GET, letter, and balance-history join. https://github.com/hritikgasdf/settlewell/pull/4
-10. Data model and ledger — not started. No PR.
+9. Sandbox driver and contract check — merged. Create, SENT, FAILED 90701, CANCELLED on GET, letter, and balance-history join. https://github.com/hritikgasdf/settlewell/pull/4
+10. Data model and ledger — done. Seed creates Lumen Textiles GmbH, INV-2291, and its transfer. https://github.com/hritikgasdf/settlewell/pull/5
 11. Poller, PAYOUT_REVERSAL join, and account-wide transfer index — not started. No PR.
 12. Policy engine v1 and failure-code tests — not started. No PR.
 13. Claim parser and match to obligation — not started. No PR.
