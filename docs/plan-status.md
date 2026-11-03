@@ -37,7 +37,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 33. Property test — in review. Fixed examples keep one live payment, a second-person approval, and proof only on SENT or PAID. https://github.com/hritikgasdf/settlewell/pull/28
 34. Seed/reset script that leaves nothing at SENT — in review. Reset reseeds the hero and releases sandbox SENT transfers on the demo host only. https://github.com/hritikgasdf/settlewell/pull/29
 35. One-command local run of the app — in review. `uv run python -m settlewell` opens the mock console with no credentials. https://github.com/hritikgasdf/settlewell/pull/30
-36. Offline mock mode that replays the hero — not started. No PR.
+36. Offline mock mode that replays the hero — in review. The hero runs offline, labelled MOCK, with a fidelity table. https://github.com/hritikgasdf/settlewell/pull/31
 37. README with setup, reference credit, baseline table, and honest limits — not started. No PR.
 38. Code readability pass — not started. No PR.
 39. Feature freeze — not started. No PR.
