@@ -474,14 +474,47 @@ def lock_fx_quote(
 
 
 def consume_fx_quote(conn: sqlite3.Connection, quote_id: str, conversion_id: str) -> None:
-    """A quote is used at most once."""
-    row = conn.execute("SELECT state FROM fx_quote WHERE quote_id = ?", (quote_id,)).fetchone()
-    if row is None or row["state"] != "LOCKED":
-        raise LedgerError("quote is not available")
-    conn.execute(
-        "UPDATE fx_quote SET state = 'CONSUMED', consumed_by = ? WHERE quote_id = ?",
+    """Claim a locked quote. The update is the lock: a second caller changes no row.
+
+    Pass an empty conversion id to claim before create_conversion, then
+    record_fx_conversion once the conversion id exists.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE fx_quote
+        SET state = 'CONSUMED', consumed_by = ?
+        WHERE quote_id = ? AND state = 'LOCKED'
+        """,
         (conversion_id, quote_id),
     )
+    if cursor.rowcount != 1:
+        raise LedgerError("quote is not available")
+
+
+def record_fx_conversion(conn: sqlite3.Connection, quote_id: str, conversion_id: str) -> None:
+    """Store the conversion id on a quote claimed before the conversion was sent."""
+    cursor = conn.execute(
+        """
+        UPDATE fx_quote SET consumed_by = ?
+        WHERE quote_id = ? AND state = 'CONSUMED' AND consumed_by = ''
+        """,
+        (conversion_id, quote_id),
+    )
+    if cursor.rowcount != 1:
+        raise LedgerError("quote is not available")
+
+
+def release_unsent_fx_quote(conn: sqlite3.Connection, quote_id: str) -> None:
+    """Return a claimed quote to LOCKED when the conversion was not created."""
+    cursor = conn.execute(
+        """
+        UPDATE fx_quote SET state = 'LOCKED', consumed_by = NULL
+        WHERE quote_id = ? AND state = 'CONSUMED' AND consumed_by = ''
+        """,
+        (quote_id,),
+    )
+    if cursor.rowcount != 1:
+        raise LedgerError("quote is not available")
 
 
 def expire_fx_quote(conn: sqlite3.Connection, quote_id: str) -> None:

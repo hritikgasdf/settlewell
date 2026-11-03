@@ -15,7 +15,14 @@ from backend.approvals import (
     binding_hash,
     propose,
 )
-from backend.ledger import consume_fx_quote, expire_fx_quote, lock_fx_quote
+from backend.ledger import (
+    LedgerError,
+    consume_fx_quote,
+    expire_fx_quote,
+    lock_fx_quote,
+    record_fx_conversion,
+    release_unsent_fx_quote,
+)
 
 _AIRWALLEX_EXPIRY = frozenset({"expired_quote", "quote_expired"})
 
@@ -81,6 +88,12 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
         (row["incident_id"],),
     ).fetchone()
     sell, buy = quote["pair"].split("/")
+    quote_id = str(terms.quote_id)
+    try:
+        consume_fx_quote(conn, quote_id, "")
+    except LedgerError:
+        raise FxQuoteError("consumed") from None
+    conn.commit()
     try:
         conversion = client.create_conversion(
             quote_id=terms.quote_id,
@@ -91,9 +104,11 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
         )
     except AirwallexError as error:
         if error.code in _AIRWALLEX_EXPIRY:
+            release_unsent_fx_quote(conn, quote_id)
+            conn.commit()
             return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"])
         raise
-    consume_fx_quote(conn, str(terms.quote_id), conversion.conversion_id)
+    record_fx_conversion(conn, quote_id, conversion.conversion_id)
     conn.commit()
     return FxDecision("converted", str(terms.quote_id), approval_id, conversion.conversion_id)
 

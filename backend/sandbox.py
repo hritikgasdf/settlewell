@@ -61,11 +61,29 @@ class ContractResult:
         )
 
 
+_SENT_PAGE_SIZE = 10
+_SENT_PAGE_LIMIT = 5
+
+
 class SandboxDriver:
     def __init__(self, client, *, sleep: Sleeper | None = None, attempts: int = 8) -> None:
         self._client = client
         self._sleep = sleep or _noop
         self._attempts = attempts
+
+    def list_remote_sent(self) -> list[str]:
+        """List sandbox transfers at SENT. Stops after a fixed number of pages."""
+        found: list[str] = []
+        page = None
+        for _ in range(_SENT_PAGE_LIMIT):
+            batch = self._client.list_transfers(page_size=_SENT_PAGE_SIZE, page=page)
+            for item in batch.items:
+                if item.status == "SENT" and item.id and not str(item.id).startswith("synthetic"):
+                    found.append(item.id)
+            page = batch.page_after
+            if not page:
+                break
+        return found
 
     def release_sent(self, transfer_id: str) -> Transfer:
         """Move a sandbox transfer off SENT. A transfer that is not SENT is left alone."""
