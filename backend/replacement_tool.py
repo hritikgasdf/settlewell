@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
+from backend.airwallex.types import BalanceHistoryPage
 from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
 
 
+@dataclass(frozen=True)
+class RefundCard:
+    unlocked: bool
+    text: str | None
+
+
+def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
+    """Show the returned principal and the lost fee. Replace stays locked until then."""
+    obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
+    if obligation is None or obligation["live_transfer_id"] is None:
+        return RefundCard(False, None)
+    original = conn.execute(
+        "SELECT * FROM transfer_record WHERE id = ?",
+        (obligation["live_transfer_id"],),
+    ).fetchone()
+    if original is None or not original["airwallex_id"]:
+        return RefundCard(False, None)
+    remote = client.get_transfer(original["airwallex_id"])
+    reversal = _reversal_for(client, original["airwallex_id"], remote.transfer_currency)
+    if reversal is None or reversal.amount is None:
+        return RefundCard(False, None)
+    fee = remote.fee_amount if remote.fee_amount is not None else Decimal(0)
+    text = f"principal back: {_euro(abs(Decimal(reversal.amount)))} · fee lost {_euro(Decimal(fee))}"
+    return RefundCard(True, text)
+
+
 def propose_replacement(conn, client, *, obligation_id: int, incident_ref: str) -> str:
+    card = refund_card(conn, client, obligation_id=obligation_id)
+    if not card.unlocked:
+        raise ReplaceError("refund")
     incident = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_ref,)).fetchone()
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
     if incident is None or obligation is None or incident["obligation_id"] != obligation_id:
@@ -57,3 +88,28 @@ def _next_attempt(conn, invoice_ref: str) -> int:
         if suffix.isdigit():
             numbers.append(int(suffix))
     return max(numbers, default=0) + 1
+
+
+def _reversal_for(client, transfer_id: str, currency: str | None):
+    if not currency:
+        return None
+    page_token = None
+    for _ in range(5):
+        history: BalanceHistoryPage = client.balance_history(
+            currency=currency,
+            page_size=10,
+            page=page_token,
+        )
+        for item in history.items:
+            if item.transaction_type == "PAYOUT_REVERSAL" and item.source == transfer_id:
+                return item
+        if not history.has_more or not history.page_after:
+            return None
+        page_token = history.page_after
+    return None
+
+
+def _euro(amount: Decimal) -> str:
+    if amount == amount.to_integral_value():
+        return f"€{int(amount):,}"
+    return f"€{amount:,.2f}"
