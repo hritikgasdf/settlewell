@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS approval (
     binding_hash TEXT NOT NULL,
     expires_at TEXT,
     used_at TEXT,
-    approver TEXT
+    approver TEXT,
+    proposer TEXT
 );
 CREATE TABLE IF NOT EXISTS proof_document (
     id INTEGER PRIMARY KEY,
@@ -174,6 +175,9 @@ def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
 
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(approval)")}
+    if "proposer" not in columns:
+        conn.execute("ALTER TABLE approval ADD COLUMN proposer TEXT")
     conn.commit()
 
 
