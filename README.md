@@ -2,7 +2,7 @@
 
 Settlewell (formerly "Where's My Money?") is Hritik's Airwallex Agentic Banking Hackathon entry: a supplier payment incident commander.
 
-This repository currently contains project setup only.
+Project setup is in place, and `backend/airwallex` is the sandbox adapter. From the repo root, `uv run pytest` runs the unit tests with no network and no secrets.
 
 ## MCP
 
