@@ -39,7 +39,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 35. One-command local run of the app — in review. `uv run python -m settlewell` opens the mock console with no credentials. https://github.com/hritikgasdf/settlewell/pull/30
 36. Offline mock mode that replays the hero — in review. The hero runs offline, labelled MOCK, with a fidelity table. https://github.com/hritikgasdf/settlewell/pull/31
 37. README with setup, reference credit, baseline table, and honest limits — in review. Setup, the kit 3 credit line, the no-LLM baseline table, and the open limits. https://github.com/hritikgasdf/settlewell/pull/32
-38. Code readability pass — not started. No PR.
+38. Code readability pass — in review. Eval cases 24–29 report rule ids, and the README table matches. https://github.com/hritikgasdf/settlewell/pull/33
 39. Feature freeze — not started. No PR.
 40. Rehearse the hero twice on the sandbox — not started. No PR.
 41. Rough-cut video and side clips — not started. No PR.
