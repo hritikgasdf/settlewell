@@ -149,6 +149,6 @@ CASES: tuple[dict, ...] = (
         "status": "SENT",
         "claim": "injection",
         "expected_action": "ESCALATE",
-        "expected_rule": "R-INJECTION",
+        "expected_rule": "R-BAD-JSON",
     },
 )

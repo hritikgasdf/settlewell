@@ -1,6 +1,7 @@
 """The first 15 incidents pass offline. No network."""
 
-from backend.eval_harness import EvalError, main, run_first_15
+from backend.eval_cases import CASES
+from backend.eval_harness import EvalError, _score, main, run_first_15
 
 
 def test_the_harness_refuses_to_run_outside_mock(monkeypatch):
@@ -24,3 +25,12 @@ def test_the_first_15_match_their_rule_and_action(monkeypatch, capsys):
     lines = capsys.readouterr().out.strip().splitlines()
     assert lines[-1] == "15/15"
     assert all(line.split()[-3] == "pass" for line in lines[:-1])
+
+
+def test_a_wrong_expected_rule_is_reported_as_fail(monkeypatch):
+    monkeypatch.setenv("SETTLEWELL_MOCK", "1")
+    case = dict(CASES[0])
+    case["expected_rule"] = "R-NOT-A-RULE"
+    result = _score(case)
+    assert result.passed is False
+    assert result.rule_id == "R-NO-REPLACE-IN-FLIGHT"
