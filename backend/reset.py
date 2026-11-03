@@ -24,6 +24,7 @@ def reset_demo(conn, *, base_url: str, driver=None) -> int:
     """Wipe the local ledger, reseed the hero, and release sandbox SENT transfers."""
     if not demo_base(base_url):
         raise ResetError("base")
+    migrate(conn)
     if driver is not None:
         remote: list[str] = []
         list_remote = getattr(driver, "list_remote_sent", None)

@@ -38,6 +38,20 @@ class Api:
         raise AssertionError("reset does not cancel through the transfer API")
 
 
+def test_reset_on_a_fresh_database_migrates_before_listing():
+    conn = connect()
+
+    class Driver:
+        def list_remote_sent(self) -> list[str]:
+            return []
+
+        def release_sent(self, transfer_id: str) -> None:
+            raise AssertionError(transfer_id)
+
+    reset_demo(conn, base_url=DEMO, driver=Driver())
+    assert conn.execute("SELECT invoice_ref FROM obligation").fetchone()["invoice_ref"] == "INV-2291"
+
+
 def test_reset_refuses_a_non_demo_base():
     conn = connect()
     with pytest.raises(ResetError) as caught:
