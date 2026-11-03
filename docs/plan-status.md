@@ -41,7 +41,7 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 37. README with setup, reference credit, baseline table, and honest limits — in review. Setup, the kit 3 credit line, the no-LLM baseline table, and the open limits. https://github.com/hritikgasdf/settlewell/pull/32
 38. Code readability pass — in review. Eval cases 24–29 report rule ids, and the README table matches. https://github.com/hritikgasdf/settlewell/pull/33
 39. Feature freeze — in review. No new actions, incidents, or console pages after this line. https://github.com/hritikgasdf/settlewell/pull/35
-40. Rehearse the hero twice on the sandbox — in review. Two later runs locked a USD→EUR quote, converted once, and rejected reuse. https://github.com/hritikgasdf/settlewell/pull/37
+40. Rehearse the hero twice on the sandbox — done. First pair https://github.com/hritikgasdf/settlewell/pull/36. Locked-quote pair https://github.com/hritikgasdf/settlewell/pull/37.
 41. Rough-cut video and side clips — not started. No PR.
 42. Writeup outline and draft — not started. No PR.
 43. Final video and backup recording — not started. No PR.
