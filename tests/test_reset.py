@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.airwallex.types import Transfer
+from backend.airwallex.types import Transfer, TransferPage
 from backend.ledger import connect, seed_hero
 from backend.reset import ResetError, reset_demo, sent_sandbox_ids
 from backend.sandbox import SandboxDriver
@@ -90,6 +90,46 @@ def test_reset_restores_the_hero_and_releases_only_real_sent_ids():
     assert conn.execute(
         "SELECT id FROM transfer_record WHERE status = 'SENT' AND airwallex_id NOT LIKE 'synthetic%'"
     ).fetchone() is None
+
+
+def test_remote_sent_listing_stops_after_five_pages():
+    class Pages:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list_transfers(self, *, request_id=None, short_reference_id=None, page_size=None, page=None):
+            del request_id, short_reference_id, page
+            assert page_size == 10
+            self.calls += 1
+            return TransferPage(
+                items=(
+                    Transfer(id=f"tr_page_{self.calls}", status="SENT"),
+                    Transfer(id="synthetic-remote", status="SENT"),
+                    Transfer(id=f"tr_paid_{self.calls}", status="PAID"),
+                ),
+                page_after="more",
+            )
+
+    api = Pages()
+    ids = SandboxDriver(api, sleep=lambda _seconds: None).list_remote_sent()
+    assert api.calls == 5
+    assert ids == [f"tr_page_{number}" for number in range(1, 6)]
+
+
+def test_reset_releases_a_remote_sent_transfer_that_is_not_in_the_ledger():
+    conn = connect()
+    seed_hero(conn)
+    released: list[str] = []
+
+    class Driver:
+        def list_remote_sent(self) -> list[str]:
+            return ["tr_remote", "synthetic-remote", "tr_remote"]
+
+        def release_sent(self, transfer_id: str) -> None:
+            released.append(transfer_id)
+
+    reset_demo(conn, base_url=DEMO, driver=Driver())
+    assert released == ["tr_remote"]
 
 
 def test_reset_command_does_not_print_credentials(monkeypatch, capsys, tmp_path):

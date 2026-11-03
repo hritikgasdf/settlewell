@@ -96,3 +96,52 @@ def test_replace_stays_locked_until_the_refund_card_shows_the_fee():
     shown = refund_card(conn, Wallet(reversal=True), obligation_id=obligation_id)
     assert shown.unlocked is True
     assert shown.text == "principal back: €4,200 · fee lost €13.47"
+
+
+def test_a_usd_or_gbp_reversal_uses_that_currency():
+    conn = connect()
+    obligation_id, _incident_ref = _ids(conn)
+
+    class Book:
+        def __init__(self, currency: str, amount: str, fee: str) -> None:
+            self.currency = currency
+            self.amount = Decimal(amount)
+            self.fee = Decimal(fee)
+
+        def get_transfer(self, transfer_id: str) -> Transfer:
+            return Transfer(
+                id=transfer_id,
+                status="CANCELLED",
+                transfer_amount=self.amount,
+                transfer_currency=self.currency,
+                fee_amount=self.fee,
+                fee_currency=self.currency,
+                reference="INV-2291",
+            )
+
+        def balance_history(self, **_kwargs) -> BalanceHistoryPage:
+            return BalanceHistoryPage(
+                items=(
+                    BalanceHistoryItem(
+                        id="rev",
+                        source="awx-hero",
+                        amount=self.amount,
+                        currency=self.currency,
+                        balance=None,
+                        description=None,
+                        fee=Decimal(0),
+                        posted_at=None,
+                        source_type="PAYOUT",
+                        transaction_type="PAYOUT_REVERSAL",
+                        account_type=None,
+                        reference="INV-2291",
+                    ),
+                ),
+                has_more=False,
+                page_after=None,
+            )
+
+    usd = refund_card(conn, Book("USD", "4200", "13.47"), obligation_id=obligation_id)
+    gbp = refund_card(conn, Book("GBP", "1000", "2.50"), obligation_id=obligation_id)
+    assert usd.text == "principal back: $4,200 · fee lost $13.47"
+    assert gbp.text == "principal back: £1,000 · fee lost £2.50"

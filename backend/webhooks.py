@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -95,18 +96,20 @@ def receive_webhook(
     if not isinstance(payload, dict) or not payload.get("id"):
         raise WebhookError("body")
     event_id = str(payload["id"])
-    if conn.execute("SELECT id FROM webhook_event WHERE event_id = ?", (event_id,)).fetchone():
-        return WebhookResult("duplicate")
     name = str(payload.get("name") or "")
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    try:
+        conn.execute(
+            """
+            INSERT INTO webhook_event (event_id, name, x_timestamp, signature_ok, processed_at)
+            VALUES (?, ?, ?, 1, ?)
+            """,
+            (event_id, name, x_timestamp, _iso(timestamp)),
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return WebhookResult("duplicate")
     outcome = _apply(conn, name, data, timestamp)
-    conn.execute(
-        """
-        INSERT INTO webhook_event (event_id, name, x_timestamp, signature_ok, processed_at)
-        VALUES (?, ?, ?, 1, ?)
-        """,
-        (event_id, name, x_timestamp, _iso(timestamp)),
-    )
     conn.commit()
     return WebhookResult(outcome)
 

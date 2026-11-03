@@ -25,7 +25,15 @@ def reset_demo(conn, *, base_url: str, driver=None) -> int:
     if not demo_base(base_url):
         raise ResetError("base")
     if driver is not None:
-        for transfer_id in sent_sandbox_ids(conn):
+        remote: list[str] = []
+        list_remote = getattr(driver, "list_remote_sent", None)
+        if list_remote is not None:
+            remote = [str(item) for item in list_remote()]
+        released: set[str] = set()
+        for transfer_id in [*sent_sandbox_ids(conn), *remote]:
+            if not transfer_id or transfer_id in released or transfer_id.startswith("synthetic"):
+                continue
+            released.add(transfer_id)
             driver.release_sent(transfer_id)
     clear_ledger(conn)
     return seed_hero(conn)

@@ -32,7 +32,9 @@ def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
     if reversal is None or reversal.amount is None:
         return RefundCard(False, None)
     fee = remote.fee_amount if remote.fee_amount is not None else Decimal(0)
-    text = f"principal back: {_euro(abs(Decimal(reversal.amount)))} · fee lost {_euro(Decimal(fee))}"
+    principal = _money(reversal.currency or remote.transfer_currency, abs(Decimal(reversal.amount)))
+    lost = _money(remote.fee_currency or remote.transfer_currency, Decimal(fee))
+    text = f"principal back: {principal} · fee lost {lost}"
     return RefundCard(True, text)
 
 
@@ -115,7 +117,18 @@ def _reversal_for(client, transfer_id: str, currency: str | None):
     return None
 
 
-def _euro(amount: Decimal) -> str:
+_SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}
+
+
+def _money(currency: str | None, amount: Decimal) -> str:
+    """Format an amount in the transfer currency. EUR stays €4,200 / €13.47."""
+    code = (currency or "").upper()
     if amount == amount.to_integral_value():
-        return f"€{int(amount):,}"
-    return f"€{amount:,.2f}"
+        shown = f"{int(amount):,}"
+    else:
+        shown = f"{amount:,.2f}"
+    symbol = _SYMBOLS.get(code)
+    if symbol:
+        return f"{symbol}{shown}"
+    prefix = f"{code} " if code else ""
+    return f"{prefix}{shown}"

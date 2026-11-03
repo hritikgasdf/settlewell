@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import threading
 
 import pytest
 
@@ -155,6 +156,42 @@ def test_a_replayed_event_does_not_apply_twice():
     assert second.outcome == "duplicate"
     assert conn.execute("SELECT COUNT(*) AS n FROM status_snapshot").fetchone()["n"] == 1
     assert conn.execute("SELECT COUNT(*) AS n FROM webhook_event").fetchone()["n"] == 1
+
+
+def test_concurrent_replays_apply_the_event_once(tmp_path):
+    path = tmp_path / "hooks.db"
+    conn = connect(path)
+    _hero(conn, status="SENT")
+    conn.close()
+    body = _event("evt-race", "payout.transfer.paid", NOW, "PAID")
+    raw, signature = _signed(body, NOW)
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def worker() -> None:
+        local = connect(path)
+        barrier.wait()
+        result = receive_webhook(
+            local,
+            secret=SECRET,
+            raw_body=raw,
+            x_timestamp=str(NOW),
+            x_signature=signature,
+            now_ms=NOW,
+        )
+        outcomes.append(result.outcome)
+        local.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(outcomes) == ["applied", "duplicate"]
+    stored = connect(path)
+    assert _status(stored) == "PAID"
+    assert stored.execute("SELECT COUNT(*) AS n FROM webhook_event").fetchone()["n"] == 1
+    assert stored.execute("SELECT COUNT(*) AS n FROM status_snapshot").fetchone()["n"] == 1
 
 
 def test_paid_stays_provisional_until_the_settle_window():

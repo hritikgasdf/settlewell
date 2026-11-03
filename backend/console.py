@@ -44,21 +44,36 @@ def render(path: str, conn=None) -> str:
     if conn is None:
         conn = connect()
     seed_console(conn)
-    if path in ("/", "/inbox"):
-        page = _inbox(conn)
-    elif path == "/ledger":
-        page = _ledger(conn)
-    elif path == "/outbox":
-        page = _outbox(conn)
-    elif path == "/replay":
-        page = render_replay()
-    elif path.startswith("/incidents/"):
-        page = _incident(conn, path.removeprefix("/incidents/"))
-    else:
-        page = _layout("Not found", "<p>That page is not in the console.</p>")
+    page = _dispatch(conn, path, ledger=False)
     if own:
         conn.close()
     return page
+
+
+def render_ledger(path: str, conn) -> str:
+    """Read one page from the ledger. Does not seed and does not call Airwallex."""
+    migrate(conn)
+    conn.execute("PRAGMA query_only = ON")
+    try:
+        page = _dispatch(conn, path, ledger=True)
+    finally:
+        conn.execute("PRAGMA query_only = OFF")
+    note = "<p>Sandbox ledger. This page does not call Airwallex.</p>\n"
+    return page.replace("<body>\n", "<body>\n" + note, 1)
+
+
+def _dispatch(conn, path: str, *, ledger: bool) -> str:
+    if path in ("/", "/inbox"):
+        return _inbox(conn, ledger=ledger)
+    if path == "/ledger":
+        return _ledger(conn)
+    if path == "/outbox":
+        return _outbox(conn)
+    if path == "/replay" and not ledger:
+        return render_replay()
+    if path.startswith("/incidents/"):
+        return _incident(conn, path.removeprefix("/incidents/"), ledger=ledger)
+    return _layout("Not found", "<p>That page is not in the console.</p>")
 
 
 def seed_console(conn) -> None:
@@ -270,28 +285,44 @@ def _seed_result(conn) -> None:
     )
 
 
-def _inbox(conn) -> str:
-    rows = conn.execute(
-        """
-        SELECT incident.id, incident.claim_json, obligation.invoice_ref, decision.proposed_action
-        FROM incident
-        JOIN obligation ON obligation.id = incident.obligation_id
-        JOIN decision ON decision.incident_id = incident.id
-        WHERE incident.claim_json LIKE 'console:%'
-        ORDER BY incident.id
-        """
-    ).fetchall()
-    items = []
-    for row in rows:
-        label = _LABELS.get(row["claim_json"], row["claim_json"])
-        href = f"/incidents/{row['id']}"
-        text = f"{label} · {row['invoice_ref']} · {row['proposed_action']}"
-        items.append(f'<li><a href="{escape(href)}">{escape(text)}</a></li>')
-    body = (
-        '<p><a href="/ledger">Money ledger</a> · <a href="/outbox">Outbox</a>'
-        ' · <a href="/replay">Hero replay</a></p>'
-        f'<ul class="inbox">{"".join(items)}</ul>'
-    )
+def _inbox(conn, *, ledger: bool = False) -> str:
+    if ledger:
+        rows = conn.execute(
+            """
+            SELECT incident.id, incident.state, obligation.invoice_ref
+            FROM incident
+            JOIN obligation ON obligation.id = incident.obligation_id
+            ORDER BY incident.id
+            """
+        ).fetchall()
+        items = []
+        for row in rows:
+            href = f"/incidents/{row['id']}"
+            text = f"{row['invoice_ref']} · {row['state']}"
+            items.append(f'<li><a href="{escape(href)}">{escape(text)}</a></li>')
+        links = '<p><a href="/ledger">Money ledger</a> · <a href="/outbox">Outbox</a></p>'
+    else:
+        rows = conn.execute(
+            """
+            SELECT incident.id, incident.claim_json, obligation.invoice_ref, decision.proposed_action
+            FROM incident
+            JOIN obligation ON obligation.id = incident.obligation_id
+            JOIN decision ON decision.incident_id = incident.id
+            WHERE incident.claim_json LIKE 'console:%'
+            ORDER BY incident.id
+            """
+        ).fetchall()
+        items = []
+        for row in rows:
+            label = _LABELS.get(row["claim_json"], row["claim_json"])
+            href = f"/incidents/{row['id']}"
+            text = f"{label} · {row['invoice_ref']} · {row['proposed_action']}"
+            items.append(f'<li><a href="{escape(href)}">{escape(text)}</a></li>')
+        links = (
+            '<p><a href="/ledger">Money ledger</a> · <a href="/outbox">Outbox</a>'
+            ' · <a href="/replay">Hero replay</a></p>'
+        )
+    body = f'{links}<ul class="inbox">{"".join(items)}</ul>'
     return _layout("Inbox", body)
 
 
@@ -380,13 +411,14 @@ def _money(currency: str, amount: str) -> str:
     return escape(shown)
 
 
-def _incident(conn, raw_id: str) -> str:
+def _incident(conn, raw_id: str, *, ledger: bool = False) -> str:
     try:
         incident_id = int(raw_id)
     except ValueError:
         return _layout("Not found", "<p>That incident is not in the inbox.</p>")
     incident = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_id,)).fetchone()
-    if incident is None or not str(incident["claim_json"] or "").startswith("console:"):
+    seeded = str(incident["claim_json"] or "").startswith("console:") if incident else False
+    if incident is None or (not ledger and not seeded):
         return _layout("Not found", "<p>That incident is not in the inbox.</p>")
     decision = conn.execute(
         "SELECT * FROM decision WHERE incident_id = ? ORDER BY id DESC LIMIT 1",
@@ -400,7 +432,14 @@ def _incident(conn, raw_id: str) -> str:
         "SELECT detail FROM audit_event WHERE incident_id = ? AND kind = 'evidence'",
         (incident_id,),
     ).fetchall()
-    label = _LABELS.get(incident["claim_json"], incident["claim_json"])
+    invoice = conn.execute(
+        "SELECT invoice_ref FROM obligation WHERE id = ?",
+        (incident["obligation_id"],),
+    ).fetchone()
+    label = _LABELS.get(incident["claim_json"]) or (
+        invoice["invoice_ref"] if invoice else "Incident"
+    )
+    rule = decision["rule_id"] if decision else "No decision yet."
     steps = "".join(
         f"<li>{escape(row['at'])} · {escape(row['kind'])} · {escape(str(row['detail']))}</li>"
         for row in timeline(conn, incident_id)
@@ -422,7 +461,7 @@ def _incident(conn, raw_id: str) -> str:
     <h1>{escape(label)}</h1>
     <section id="timeline"><h2>Timeline</h2><ul>{steps}</ul></section>
     <section id="decision"><h2>Decision</h2>
-      <p class="rule-id">{escape(decision['rule_id'])}</p>
+      <p class="rule-id">{escape(rule)}</p>
       <ul class="evidence">{evidence_html}</ul>
     </section>
     <section id="approval"><h2>Approval</h2>

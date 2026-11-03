@@ -1,5 +1,6 @@
 """A quote is used once. An expired quote is replaced and approved again. No network."""
 
+import threading
 from decimal import Decimal
 
 import pytest
@@ -8,7 +9,7 @@ from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import Conversion, FxQuote
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalError, ApprovalTerms, binding_hash
 from backend.fx_quote import FxQuoteError, approve_fx_quote, execute_fx_quote, propose_fx_quote
-from backend.ledger import connect, consume_fx_quote, lock_fx_quote, seed_hero
+from backend.ledger import LedgerError, connect, consume_fx_quote, lock_fx_quote, migrate, seed_hero
 
 EARLY = "2026-11-03T12:30:00+00:00"
 VALID = "2026-11-03T13:00:00+00:00"
@@ -155,6 +156,49 @@ def test_an_expired_quote_is_requoted_again_before_execute():
         (decision.approval_id,),
     ).fetchone()
     assert new["used_at"] is None
+
+
+def test_two_concurrent_claims_allow_one_conversion(tmp_path):
+    path = tmp_path / "fx.db"
+    conn = connect(path)
+    migrate(conn)
+    lock_fx_quote(
+        conn,
+        quote_id="quo_race",
+        pair="USD/EUR",
+        rate="1.10",
+        amount="100.00",
+        valid_to=VALID,
+    )
+    conn.commit()
+    conn.close()
+    barrier = threading.Barrier(2)
+    sent: list[str] = []
+    lost: list[str] = []
+
+    def worker(name: str) -> None:
+        local = connect(path)
+        barrier.wait()
+        try:
+            consume_fx_quote(local, "quo_race", "")
+            local.commit()
+            sent.append(name)
+        except LedgerError:
+            lost.append(name)
+        finally:
+            local.close()
+
+    threads = [threading.Thread(target=worker, args=(str(index),)) for index in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sent == ["1"] or sent == ["2"]
+    assert len(sent) == 1
+    assert len(lost) == 1
+    stored = connect(path)
+    row = stored.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_race'").fetchone()
+    assert row["state"] == "CONSUMED"
 
 
 def test_a_reused_quote_is_rejected_as_consumed():

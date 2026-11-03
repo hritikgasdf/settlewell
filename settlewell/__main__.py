@@ -7,7 +7,8 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from backend.console import ConsoleError, render
+from backend.console import ConsoleError, render, render_ledger
+from backend.reset import open_ledger
 from settlewell.flags import sandbox_enabled
 
 HOST = "127.0.0.1"
@@ -32,14 +33,14 @@ def prepare() -> str:
 def handle(path: str) -> tuple[int, bytes]:
     """Return a console page. Page handlers do not call Airwallex."""
     prepare()
-    if local_mode() == "sandbox":
-        page = _layout(
-            "Sandbox",
-            "<p>Sandbox mode is selected. This process does not call Airwallex.</p>"
-            "<p>Unset <code>SETTLEWELL_SANDBOX</code> to open the mock console.</p>",
-        )
-        return 200, page.encode()
     route = path.split("?", 1)[0] or "/"
+    if local_mode() == "sandbox":
+        conn = open_ledger(os.environ.get("SETTLEWELL_DB", "var/settlewell.db"))
+        try:
+            page = render_ledger(route, conn)
+        finally:
+            conn.close()
+        return 200, page.encode()
     try:
         page = render(route)
     except ConsoleError:

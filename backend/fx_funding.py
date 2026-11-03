@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.ledger import consume_fx_quote, lock_fx_quote
+from backend.ledger import consume_fx_quote, lock_fx_quote, record_fx_conversion
 
 RESERVE_FLOOR = Decimal("1000.00")
 FX_LIMIT = Decimal("10000.00")
@@ -63,6 +63,8 @@ def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> Funding
     if quote.sell_amount is not None and quote.sell_amount > usd:
         conn.commit()
         return FundingResult("escalate", quote_id=quote.quote_id, buy_amount=shortfall)
+    consume_fx_quote(conn, quote.quote_id, "")
+    conn.commit()
     conversion = client.create_conversion(
         quote_id=quote.quote_id,
         buy_currency="EUR",
@@ -70,7 +72,7 @@ def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> Funding
         buy_amount=shortfall,
         request_id=f"stl-fx-{obligation_id}",
     )
-    consume_fx_quote(conn, quote.quote_id, conversion.conversion_id)
+    record_fx_conversion(conn, quote.quote_id, conversion.conversion_id)
     after = client.current_balances()
     _snapshot(conn, "EUR", _available(after, "EUR"), as_of, "after")
     _snapshot(conn, "USD", _available(after, "USD"), as_of, "after")

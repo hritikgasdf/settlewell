@@ -21,7 +21,7 @@ uv run python -m settlewell
 
 The console listens on `http://127.0.0.1:8765/`. Mock mode is the default, so this needs no Airwallex credentials. From the inbox, open an incident, the money ledger, the outbox, and the hero replay at `http://127.0.0.1:8765/replay`.
 
-Sandbox mode is off unless you set `SETTLEWELL_SANDBOX=1`. The live contract is `SETTLEWELL_SANDBOX=1 uv run python -m backend.scripts.sandbox_contract`. Reset the local hero with `uv run python -m backend.scripts.reset_demo`. Seed the same ledger with `uv run python -m backend.scripts.seed_ledger`.
+Sandbox mode is off unless you set `SETTLEWELL_SANDBOX=1`. That console reads the ledger at `SETTLEWELL_DB` (default `var/settlewell.db`) and does not call Airwallex from page handlers. The live contract is `SETTLEWELL_SANDBOX=1 uv run python -m backend.scripts.sandbox_contract`. Reset the local hero with `uv run python -m backend.scripts.reset_demo`. Seed the same ledger with `uv run python -m backend.scripts.seed_ledger`.
 
 Score the 30 incidents offline:
 
@@ -76,19 +76,11 @@ Case 24 reports `R-FX-FLOOR-CONVERT` when the EUR top-up is under the limit and 
 
 ## Honest limits
 
-The sandbox console page is still a stub. With `SETTLEWELL_SANDBOX=1` and mock mode off, the process serves a page that does not call Airwallex and does not read the ledger. That page stays a stub until the live-ledger follow-up lands: the console has to render from the real ledger, read-only, with no Airwallex calls from page handlers.
-
 Mock replay uses canned transfer statuses, a canned confirmation letter, a canned `PAYOUT_REVERSAL`, and a canned quote rate. The fidelity table is on `http://127.0.0.1:8765/replay` and in [`backend/mock_replay.py`](backend/mock_replay.py) (heading "Mock fidelity", `id="fidelity"`). ETA and the cut-off on that page are labels, not Airwallex API fields. A trace is a drafted support request. Settlewell does not retrieve an MT103 or a UETR. Cancelling a `PROCESSING` transfer is not a behavior this demo claims.
 
 Supplier replies sit in the outbox until a person approves them. The outbox does not send them.
 
-These items are still open:
-
-- `_euro` in `backend/replacement_tool.py` always prints €. A USD or GBP reversal should use that transfer's currency.
-- `consume_fx_quote` should claim the quote atomically (`UPDATE` where `state = 'LOCKED'`, and check the row count) before `create_conversion`, so two concurrent converts cannot both send.
-- Concurrent webhook deliveries should insert `webhook_event.event_id` and catch the unique-constraint error. A read-then-insert race can still apply the same event twice.
-- The console refuses to render outside mock mode. Before the sandbox hero demo it must render from the real ledger, read-only, with no Airwallex calls from page handlers. That is the live-ledger follow-up named above.
-- `reset_demo` releases `SENT` transfers recorded in the local ledger. It should also list remote sandbox transfers at `SENT`, with bounded pagination, so a ledger wipe cannot strand one.
+The sandbox console reads the local ledger and does not call Airwallex from its pages. A refund card uses the transfer currency. A quote is claimed with one `UPDATE` before a conversion is created. A repeated webhook inserts the event id and stops on the unique constraint. Reset lists remote `SENT` transfers for at most five pages and releases them on the demo host.
 
 ## MCP
 
