@@ -10,6 +10,30 @@ Settlewell's safety core follows Airwallex's kit 3 reference pattern — amounts
 
 New bank details become a new beneficiary after validate and a call-back. The previous beneficiary is left as it was.
 
+## Live sandbox proof
+
+One hero run on `api-demo.airwallex.com` on 2026-11-04, with `x-api-version` `2025-11-11` and `SETTLEWELL_RESERVE_FLOOR` set so the EUR shortfall was 100.00. The payment was 20.00 EUR over SWIFT. `reset_demo` ran first. The run took 37088 ms and passed. These are the Airwallex ids and the final status of each. The quote status is Settlewell's row.
+
+| What | Id | Final status |
+|---|---|---|
+| Original transfer | `856ef116-4754-4bb4-870c-2fd461751da4` | CANCELLED |
+| Cancelled duplicate | `78e1501e-0b9b-4544-984a-5111da33e5cb` | CANCELLED |
+| Replacement transfer | `a9ec4848-8322-4c3b-b006-d5ac730459e9` | PAID |
+| FX quote | `c4bd4ef1-afaf-3314-9269-0937af396e19` | CONSUMED |
+| Conversion | `62f19891-3aca-46f2-9640-8d76ad349126` | SETTLED |
+
+The duplicate cancel posted no EUR balance-history movement. A second claim on that quote was rejected. The same ids are in `docs/rehearsal.md`.
+
+## What is live vs mock
+
+| Surface | Which |
+|---|---|
+| `/replay`, and any screen that uses canned statuses, a canned confirmation letter, a canned `PAYOUT_REVERSAL`, or a canned quote rate | MOCK |
+| The seeded INV-2291 console beats (4200.00 EUR, synthetic ids) | MOCK |
+| Eval harness (`SETTLEWELL_MOCK=1`) | Offline. It does not call Airwallex |
+| The 2026-11-04 sandbox run above: create, SENT, proof, scheduled duplicate cancel, `90701`, proof refused after cancel, new beneficiary, reversal, locked USD→EUR quote, one conversion, replacement PAID | Live on `api-demo.airwallex.com` |
+| Sandbox console pages | Read the local ledger only. They do not call Airwallex |
+
 ## Setup
 
 Python 3.12 and [uv](https://docs.astral.sh/uv/). From the repo root:
