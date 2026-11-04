@@ -67,7 +67,7 @@ One more run, same host and pinned version, `reset_demo` first, `SETTLEWELL_RESE
 
 | What | Id | Final status |
 |---|---|---|
-| Original transfer | `856ef116-4754-4bb4-870c-2fd461751da4` | CANCELLED |
+| Original transfer | `856ef116-4754-4bb4-870c-2fd461751da4` | Failed 90701 (account closed); Airwallex status CANCELLED |
 | Cancelled duplicate | `78e1501e-0b9b-4544-984a-5111da33e5cb` | CANCELLED |
 | Replacement transfer | `a9ec4848-8322-4c3b-b006-d5ac730459e9` | PAID |
 | FX quote | `c4bd4ef1-afaf-3314-9269-0937af396e19` | CONSUMED |
