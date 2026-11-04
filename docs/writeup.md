@@ -5,24 +5,25 @@ Outline and draft for the HackerEarth submission. Facts are from this repo and f
 ## Outline
 
 1. Problem and who it is for
-2. Hero flow, mock and sandbox
-3. Four differentiators
-4. Locked-quote USD→EUR funding
-5. Airwallex APIs
-6. Safety
-7. Honest limits
-8. Eval: 30/30 and the no-LLM baseline
-9. What Hritik does in person
+2. What a transfer-only agent does not do
+3. Hero flow, and what is live versus mock
+4. Live sandbox proof
+5. Locked quote as supporting safety
+6. Airwallex APIs
+7. Safety
+8. Honest limits
+9. Eval: 30/30 and the no-LLM baseline
+10. What Hritik does in person
 
 ## Draft
 
 ### Problem
 
-A supplier writes that a payment never arrived, and sometimes asks to be paid again to a new account. Paying twice, paying while the original transfer is still moving, or paying new bank details from the email itself are the failures that matter.
+A supplier writes that a payment never arrived, and sometimes asks to be paid again to a new account. An agent that only replaces one failed transfer still misses that incident. It does not see a second payment a colleague scheduled, it does not refuse a proof PDF once the transfer is cancelled, and it does not keep its own history of the supplier's bank details behind a call-back.
 
-Settlewell (formerly "Where's My Money?") is a supplier payment incident commander. It matches the email to an invoice, reads the transfer, and proposes one next step: wait, prove, trace, stop a duplicate, replace, or escalate. Amounts are copied from Airwallex's record. A second person approves anything that moves money.
+Settlewell (formerly "Where's My Money?") handles the incident from that email through to closure. It matches the email to an invoice, reads the transfer, and proposes one next step: wait, prove, trace, stop a duplicate, replace, or escalate. Amounts are copied from Airwallex's record. A second person approves anything that moves money.
 
-The safety core follows Airwallex's kit 3 reference pattern: amounts copied from Airwallex's record, one replacement per failure, approver ≠ proposer, and closure with both dispositions. It also follows kit 1's single-use quote lock. What Settlewell adds is the duplicate cancel, status-gated proof, verified bank-detail versions, refund-confirmed replacement, supplier-facing replies, and webhooks.
+The safety core follows Airwallex's kit 3 reference pattern: amounts copied from Airwallex's record, one replacement per failure, approver ≠ proposer, and closure with both dispositions, plus kit 1's single-use quote lock. The reserve floor and the locked USD→EUR quote are part of that safety. They are not the headline. The headline is the supplier incident: cancel a still-scheduled duplicate at €0, gate the proof PDF on status, decide from Airwallex failure codes, and version the bank details.
 
 ### Who it is for
 
@@ -36,21 +37,47 @@ The live rehearsal on `api-demo.airwallex.com` used the adapter's pinned `x-api-
 
 `uv run python -m settlewell` serves `http://127.0.0.1:8765/` in mock mode with no credentials. Sandbox mode is `SETTLEWELL_SANDBOX=1`. That console reads `SETTLEWELL_DB` (default `var/settlewell.db`) and does not call Airwallex from page handlers.
 
-### Four differentiators
+### What is live vs mock
 
-**A colleague's duplicate, cancelled at €0.** An account-wide scan looks for another live transfer with the same invoice, amount, and currency. If that transfer is still `SCHEDULED`, the action is `STOP_DUPLICATE` (`R-STOP-DUPLICATE-SCHEDULED`). The clerk proposes and the finance approver approves. Cancel does not post a ledger fee. On the sandbox, the duplicate ended CANCELLED and the EUR balance history had no movement for it.
+| Surface | Which |
+|---|---|
+| `/replay`, and any screen that uses canned statuses, a canned confirmation letter, a canned `PAYOUT_REVERSAL`, or a canned quote rate | MOCK |
+| The seeded INV-2291 console beats (4200.00 EUR, synthetic ids) | MOCK |
+| Eval harness (`SETTLEWELL_MOCK=1`) | Offline. It does not call Airwallex |
+| The 2026-11-04 sandbox run: create, SENT, proof, scheduled duplicate cancel, `90701`, proof refused after cancel, new beneficiary, reversal, locked USD→EUR quote, one conversion, replacement PAID | Live on `api-demo.airwallex.com` |
+| Sandbox console pages | Read the local ledger only. They do not call Airwallex |
 
-**A proof PDF only while the transfer is SENT.** `issue_proof` asks Airwallex for a `NO_FEE_DISPLAY` confirmation letter only when the live status is SENT or PAID. The rule while SENT is `R-PROOF-SENT`. After the transfer is cancelled, the same request is refused and the reply says the transfer is cancelled. The mock page labels ETA and the cut-off as labels, not Airwallex API fields.
+### Live sandbox proof
 
-**Decisions from Airwallex failure codes.** Policy is a table of 29 published failure codes. The numeric code is read from `failure_reason`, for example `90701: Account closed`, which becomes `REPLACE_NEW_DETAILS` and `R-REPLACE_NEW_DETAILS-90701`. A recall such as `91001` escalates (`R-ESCALATE-91001`). The adapter pins `x-api-version` `2025-11-11` so that reason is still present on a later GET after the transfer is CANCELLED.
+On 2026-11-04 one hero run on `api-demo.airwallex.com` used `x-api-version` `2025-11-11` and `SETTLEWELL_RESERVE_FLOOR` so the EUR shortfall was 100.00. The payment was 20.00 EUR over SWIFT. `reset_demo` ran first. The run took 37088 ms and passed. The quote status is Settlewell's row. The conversion status is Airwallex's.
 
-**Our own history of supplier bank details.** New details are validated, then a call-back to the phone on file is required, then Settlewell creates a new beneficiary. The previous beneficiary is not updated. The version diff on the card is the bank name and the last four digits. An email claim with no call-back is rejected (`R-BANK-CALLBACK-REQUIRED` in the harness). Unverified details are not paid.
+| What | Id | Final status |
+|---|---|---|
+| Original transfer | `856ef116-4754-4bb4-870c-2fd461751da4` | CANCELLED |
+| Cancelled duplicate | `78e1501e-0b9b-4544-984a-5111da33e5cb` | CANCELLED |
+| Replacement transfer | `a9ec4848-8322-4c3b-b006-d5ac730459e9` | PAID |
+| FX quote | `c4bd4ef1-afaf-3314-9269-0937af396e19` | CONSUMED |
+| Conversion | `62f19891-3aca-46f2-9640-8d76ad349126` | SETTLED |
 
-### Locked-quote USD→EUR funding
+A second claim on quote `c4bd4ef1-afaf-3314-9269-0937af396e19` was rejected. The same table is in the README and in `docs/rehearsal.md`.
+
+### What a transfer-only agent does not do
+
+**Cancel a colleague's still-scheduled duplicate at €0.** The scan is account-wide: another live transfer with the same invoice, amount, and currency. While that transfer is `SCHEDULED`, the action is `STOP_DUPLICATE` (`R-STOP-DUPLICATE-SCHEDULED`). The clerk proposes and the finance approver approves. Cancel does not post a ledger fee. On the 2026-11-04 sandbox run the duplicate `78e1501e-0b9b-4544-984a-5111da33e5cb` ended CANCELLED, and the EUR balance history had no movement for it.
+
+**A status-gated proof PDF.** `issue_proof` asks for a `NO_FEE_DISPLAY` confirmation letter only while the live status is SENT or PAID. The rule while SENT is `R-PROOF-SENT`. After cancel, the same request is refused and the reply says the transfer is cancelled. The mock page's ETA and cut-off are labels, not Airwallex API fields. The live run attached proof while SENT and refused it after cancel.
+
+**Decisions from Airwallex failure codes.** Policy is a table of 29 published codes. The numeric code comes from `failure_reason`. `90701` (account closed) becomes `REPLACE_NEW_DETAILS` and `R-REPLACE_NEW_DETAILS-90701`. `91001` (recall) escalates (`R-ESCALATE-91001`). The adapter pins `x-api-version` `2025-11-11` so the reason is still on a later GET after CANCELLED. The live run took that `90701` path.
+
+**The incident, from the supplier's email through to closure.** The email is matched to an invoice. The incident stays open while the transfer is in flight, while proof is issued or refused, while a duplicate is stopped, and while a replacement waits on a refund and an approval. It closes when the ledger says the invoice was paid once. The live obligation ended `PAID_ONCE`.
+
+**Supplier bank-detail version history, with a call-back.** New details are validated. A call-back to the phone on file is required. Settlewell then creates a new beneficiary and leaves the previous one as it was. The card shows the bank-name and last-four diff. No call-back is `R-BANK-CALLBACK-REQUIRED` in the harness. Unverified details are not paid. The live run created that new beneficiary before the replacement.
+
+### Locked quote, as supporting safety
 
 Before a EUR replacement, Settlewell compares the EUR balance with the payment plus a reserve floor. The default floor is 1,000.00. A top-up above 10,000.00 is not sent; the harness reports that as `R-FX-LIMIT-ESCALATE`. Under the limit, it creates a USD→EUR quote with validity `MIN_15`, locks the quote, and converts once. The quote id is part of the approval hash. Sandbox quotes can be multi-use; Settlewell marks its own row `CONSUMED` with one `UPDATE` where `state = 'LOCKED'` before `create_conversion`, and a second claim is rejected. An expired quote is replaced and must be approved again (`R-FX-QUOTE-EXPIRED`).
 
-The default floor does not fire on the pre-funded sandbox, so the rehearsal sets `SETTLEWELL_RESERVE_FLOOR` for that process only. The shortfall was 100.00 EUR, under the 10,000 limit. Both recorded runs locked one quote, sent one conversion, and rejected a second claim. The quote ended `CONSUMED`, with balance snapshots before and after. If the variable is not a positive number, `reserve_floor` raises `FundingError` with the message `SETTLEWELL_RESERVE_FLOOR must be a positive number`.
+The default floor does not fire on the pre-funded sandbox, so the rehearsal sets `SETTLEWELL_RESERVE_FLOOR` for that process only. The shortfall was 100.00 EUR, under the 10,000 limit. The 2026-11-04 run locked quote `c4bd4ef1-afaf-3314-9269-0937af396e19`, sent conversion `62f19891-3aca-46f2-9640-8d76ad349126` (`SETTLED`), and rejected a second claim. Earlier recorded runs did the same without these ids in the note. If the variable is not a positive number, `reserve_floor` raises `FundingError` with the message `SETTLEWELL_RESERVE_FLOOR must be a positive number`.
 
 A replacement is not proposed until a `PAYOUT_REVERSAL` whose source is the original transfer is visible. The synthetic hero card reads `principal back: €4,200 · fee lost €13.47`. The live rehearsal unlocked the refund card; the fee on that 20.00 EUR transfer is not copied here because `docs/rehearsal.md` does not record it.
 

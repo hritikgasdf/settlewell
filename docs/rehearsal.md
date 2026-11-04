@@ -60,3 +60,17 @@ Total 37876 ms. Pass.
 | ledger_paid | pass | 4592 |
 
 Same end state as run 1: one consumed quote, one conversion, reuse rejected, obligation `PAID_ONCE`, and no non-synthetic `SENT` transfer left.
+
+## Live proof run, 2026-11-04
+
+One more run, same host and pinned version, `reset_demo` first, `SETTLEWELL_RESERVE_FLOOR` set so the shortfall was 100.00 EUR. Payment 20.00 EUR SWIFT. Total 37088 ms. Pass. Ids and final statuses:
+
+| What | Id | Final status |
+|---|---|---|
+| Original transfer | `856ef116-4754-4bb4-870c-2fd461751da4` | CANCELLED |
+| Cancelled duplicate | `78e1501e-0b9b-4544-984a-5111da33e5cb` | CANCELLED |
+| Replacement transfer | `a9ec4848-8322-4c3b-b006-d5ac730459e9` | PAID |
+| FX quote | `c4bd4ef1-afaf-3314-9269-0937af396e19` | CONSUMED |
+| Conversion | `62f19891-3aca-46f2-9640-8d76ad349126` | SETTLED |
+
+The quote status is Settlewell's row. The conversion status is the Airwallex conversion status. The duplicate had no EUR balance-history movement. A second claim on the quote was rejected. The obligation ended `PAID_ONCE`.
