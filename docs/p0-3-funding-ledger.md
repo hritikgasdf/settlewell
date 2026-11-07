@@ -1,20 +1,26 @@
-# P0-3 funding ledger: implementation and explicit gaps
+# P0-3 funding ledger: what is implemented and what remains
 
-New payouts pass the exact-intent claim checks, a full original principal refund, a fresh cash-only balance check including fee budget and SETTLEWELL_RESERVE_FLOOR, and (for quote-bound payouts) settled conversion verification. Existing unresolved requests recover by their stored request_id, not a new create. The payout_funding ledger records the preflight/hold and independently observed after balance, with audit events. An unreadable after balance remains explicitly missing and can be backfilled on execute/reconciliation recovery.
+New payouts pass the exact-intent claim checks, a full original principal refund, a fresh cash-only balance check including the fee budget and SETTLEWELL_RESERVE_FLOOR, and (for quote-bound payouts) settled conversion verification. Existing unresolved requests recover by their stored request_id, not a new create. The payout_funding ledger records the preflight/hold and the independently observed after balance, with audit events. An unreadable after balance stays explicitly missing and is backfilled on execute/reconciliation recovery.
 
-Reversal history traverses every cursor up to a safety ceiling of5000pages; missing/repeated cursor or ceiling exhaustion raises HistoryError and never authorizes funding. Duplicate/split credits conservatively hold instead of summing. Posted balance history is treated as posted by the endpoint contract; explicit pending/unknown status holds.
+Reversal history traverses every cursor up to a safety ceiling of 5000 pages; a missing/repeated cursor or ceiling exhaustion raises HistoryError and never authorizes funding. Duplicate/split credits hold instead of summing. Explicit pending/unknown status holds.
 
-## Not complete / do not treat as production acceptance
-- Fee is a labelled original_transfer_estimate from the live original, NOT a guaranteed price for the new payout. No verified pre-send Airwallex fee endpoint is available in this adapter. Fee drift can breach the intended reserve; a known actual breach escalates/audits but cannot undo a send.
-- Holds for accepted/unknown sends persist indefinitely until definitive first-send refusal. Debit-attribution release is not implemented, so current available balances can be conservatively double-reserved.
-- Initial-send timeout/duplicate-request lookup still lacks the strict remote-term validation applied on later restart recovery.
-- A later reconcile can overwrite the ESCALATED obligation status from a fee breach; immutable audit events remain.
-- A conversion with unknown remote id must first be resumed through its own execute intent to recover by request_id. Payout gate itself never re-creates it.
-- Refund verification does not currently reject an explicit non-cash history account type. Its source/amount/currency/status checks and cash-only current balance checks are separate.
-- Previously verified full-refund evidence is bound to principal and fresh contradictory history withdraws its use, but withdrawal itself is not a durable tombstone. If contradictory history later disappears, older verification can be reused during reconciliation (not during a fresh payout funding gate).
-- No live Airwallex, real money movement, bank fee quote, webhook runtime or periodic scheduling was exercised/built in this round. Tests use typed offline bank fakes.
+## Fee budget (conservative estimate, not a bank cap)
+- The Airwallex adapter has NO verified pre-send fee endpoint (public docs return fee_amount/fee_currency only on create). None is invented.
+- Fallback budget, source `conservative_upper_bound_estimate`: `max(2 x live original fee, 25.00)` in the payout currency, for EUR/USD/GBP only. It is a coded operational estimate, not a bank-enforced cap, and cannot guarantee future bank pricing. The original fee must be known, finite, non-negative and in the payout currency; otherwise (and for unsupported currencies) the payout holds. There is no silent zero.
+- Optional seam: a client MAY expose a read-only `quote_payout_fee(beneficiary_id, transfer_amount, transfer_currency, transfer_method)`. The gate uses it (source `adapter_fee_quote`) only if the quote matches the exact new beneficiary/amount/currency/method, has a fee in the payout currency, a provenance `source`, and an unexpired `valid_to_at`. A quote that is present but errors, is malformed, stale or for other terms HOLDS the payout (`fee` code); it never falls back. The seam is tested offline only; the real adapter does not implement it, so real runs use the fallback.
+- Planning (`fund_replacement`) and the payout gate use the same fallback. A fresh balance read must still cover amount + budget + floor: for 4200.00 that is 4200.00 + 26.94 + 1000.00 = 5226.94.
+- The budget and policy are audited in `payout_funding_preflight` and `ExecuteResult.funding_note`. Only the ACTUAL fee is charged: with an actual 13.47 fee the balance after the payout is floor + unused buffer (1013.47 in the replay), never a fictional debit.
+- An actual fee above the budget is audited (`payout_fee_over_budget`) and the obligation is ESCALATED with no resend.
 
-Work stopped after the requested maximum two Claude calls per item; remaining gaps are reported rather than hidden by more iterations.
+## Durable flags (reconcile)
+- Refund verification is a latest-transition log (`refund_verified` / `refund_withdrawn`, ordered by row id, not as_of). Fresh contradicting history appends a bound withdrawal; outage or empty history cannot resurrect it; only a fresh full CASH credit re-verifies.
+- A fee-over-budget escalation is sticky: reconcile keeps the obligation ESCALATED, never closes the incident, across restart and sibling incidents on the same obligation; outcome audits are still written. There is no automatic clear, acknowledgement or repayout.
 
-## Final local verification
-One final full mock suite:366passed,7failed. Ruff passes. Failures are legacy bank-change/eval/replay fixtures lacking live original/cash funding data; no gate bypasses or assertions were deleted to hide them. Independent execute repros confirm the initial timeout lookup can bind a foreign transfer and non-cash reversal entries are not excluded. This branch is WIP, not ready to merge.
+## Resolved since the earlier WIP
+Legacy fixtures now carry live original and explicit CASH data; the initial-send timeout/duplicate lookup binds exact request_id/beneficiary/amount/currency/reference and holds on an ambiguous cursor; refund verification requires a known CASH account type and rejects CREDIT/YIELD/missing.
+
+## Remaining limits
+- Accepted/unknown sends keep their hold (amount + fee budget) until a definitive first-send refusal. Debit-attribution release is deferred, so balances can be conservatively double-reserved.
+- A conversion with an unknown remote id must be resumed through its own execute intent (recover by request_id); the payout gate never re-creates it.
+- No live Airwallex, real money movement, webhook runtime or periodic scheduling was exercised. Tests use typed offline bank fakes.
+- The immutable first-submitted timestamp is unchanged.

@@ -1,6 +1,7 @@
 """The hero replay is deterministic and offline. No network and no secrets."""
 
 import inspect
+from decimal import Decimal
 
 import pytest
 
@@ -36,9 +37,16 @@ def test_the_replay_walks_the_hero_without_a_client():
     assert replay.paid_once is True
     assert replay.incident_cost == "13.47"
     assert replay.eur_before == "800.00"
-    assert replay.eur_after == "5200.00"
+    # Old 5200.00/95160.00 were the post-FX cash for a 4400 top-up that ignored the payout fee
+    # and never debited the payout. The gate now budgets principal + 26.94 conservative fee
+    # (2 x 13.47) + 1000 floor, so the top-up is 4426.94 (sold at 1.10 = 4869.63 USD). The fake bank
+    # debits only the ACTUAL 13.47 fee, so 13.47 of the budget stays as unused buffer above the floor.
+    assert replay.eur_after_fx == "5226.94"
+    assert replay.eur_after == "1013.47"  # 5226.94 - 4200.00 - 13.47 actual fee
+    assert Decimal(replay.eur_after) >= Decimal("1000.00")
+    assert Decimal(replay.eur_after_fx) - Decimal(replay.eur_after) == Decimal("4213.47")
     assert replay.usd_before == "100000.00"
-    assert replay.usd_after == "95160.00"
+    assert replay.usd_after == "95130.37"  # 100000.00 - 4426.94 * 1.10 = 4869.634, rounded
 
 
 def test_the_page_is_labelled_mock_and_escapes_output(monkeypatch):

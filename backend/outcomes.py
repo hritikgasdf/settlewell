@@ -103,6 +103,9 @@ def full_refund(remote, reversals: list):
     item = reversals[0]
     if item.transaction_type != "PAYOUT_REVERSAL" or not item.source or item.source != remote.id:
         return None
+    # Only a CASH credit is spendable cash. CREDIT, YIELD, unknown, empty or missing never count.
+    if str(getattr(item, "account_type", None) or "").strip().lower() != "cash":
+        return None
     amount = _positive(item.amount)
     if amount is None or (amount, item.currency) != principal:
         return None

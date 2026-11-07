@@ -102,7 +102,7 @@ class World:
                 posted_at=None,
                 source_type="PAYOUT",
                 transaction_type="PAYOUT_REVERSAL",
-                account_type=None,
+                account_type="CASH",
                 reference="INV-2291",
             )
             for source, amount in self.reversals.items()
@@ -837,4 +837,78 @@ def test_external_original_with_pointer_on_a_colleague_and_no_disposition_holds(
     assert _state(conn, incident_id)[0] == "OPEN"
     assert _audits(conn, "original_ambiguous")
     assert _audits(conn, "original_disposition") == []
+    conn.close()
+
+
+def _verified_events(conn):
+    rows = conn.execute(
+        "SELECT kind FROM audit_event WHERE kind IN ('refund_verified', 'refund_withdrawn') ORDER BY id"
+    ).fetchall()
+    return [row["kind"] for row in rows]
+
+
+def test_a_refund_withdrawal_survives_restart_and_only_a_fresh_full_credit_reverifies(tmp_path):
+    path = tmp_path / "w.db"
+    conn, incident_id, _obligation_id = _hero(path)
+    world = World()
+    poll_incident(conn, world, incident_id, seen_at=SEEN)
+    assert _verified_events(conn) == ["refund_verified"]
+
+    world.reversals = {"awx-hero": Decimal("2000.00")}  # fresh contradicting history
+    poll_incident(conn, world, incident_id, seen_at=LATER)
+    assert _verified_events(conn) == ["refund_verified", "refund_withdrawn"]
+    conn.close()
+
+    for history in ({}, {}, {"awx-hero": Decimal("2000.00")}):  # empty history never resurrects it
+        conn = connect(path)
+        world.reversals = history
+        poll_incident(conn, world, incident_id, seen_at=SEEN)  # an EARLIER as_of must not matter
+        assert _verified_events(conn) == ["refund_verified", "refund_withdrawn"]
+        conn.close()
+
+    conn = connect(path)
+    world.fail_get = {"awx-hero"}  # unreadable original: still withdrawn
+    poll_incident(conn, world, incident_id, seen_at=LATER)
+    assert _verified_events(conn) == ["refund_verified", "refund_withdrawn"]
+    world.fail_get = set()
+    world.reversals = {"awx-hero": Decimal("4200.00")}  # a fresh full CASH credit is the only way back
+    poll_incident(conn, world, incident_id, seen_at=SEEN)
+    assert _verified_events(conn) == ["refund_verified", "refund_withdrawn", "refund_verified"]
+    conn.close()
+
+
+def _over_budget_payout(conn, obligation_id, incident_id):
+    conn.execute(
+        "INSERT INTO payout_funding (request_id, intent_id, incident_id, obligation_id, currency, amount, "
+        "fee_budget, fee_currency, fee_source, reserve_floor, available_before, actual_fee, actual_fee_currency, "
+        "state, hold_state, after_state, created_at) VALUES ('rq-fee', 1, ?, ?, 'EUR', '4200.00', '26.94', 'EUR', "
+        "'conservative_upper_bound_estimate', '1000.00', '6000.00', '40.00', 'EUR', 'ACCEPTED', 'HELD', 'PENDING', ?)",
+        (incident_id, obligation_id, SEEN),
+    )
+    conn.execute("UPDATE obligation SET status = 'ESCALATED' WHERE id = ?", (obligation_id,))
+    conn.commit()
+
+
+def test_a_fee_over_budget_escalation_is_sticky_across_reconcile_restart_and_sibling_incidents(tmp_path):
+    path = tmp_path / "f.db"
+    conn, incident_id, obligation_id = _hero(path)
+    conn.execute("UPDATE transfer_record SET status = 'SENT' WHERE airwallex_id = 'awx-hero'")
+    _external(conn, obligation_id, "awx-col", "SENT")
+    _over_budget_payout(conn, obligation_id, incident_id)
+    sibling = _second_incident(conn, obligation_id)
+    world = World()
+    world.remote["awx-col"] = _t("awx-col", "PAID", "colleague-hand")
+    conn.close()
+
+    for seen_at in (LATER, SEEN):  # everything else says close: original returned, one paid, no unknowns
+        for target in (incident_id, sibling, incident_id):
+            conn = connect(path)
+            poll_incident(conn, world, target, seen_at=seen_at)
+            assert conn.execute("SELECT status FROM obligation").fetchone()["status"] == "ESCALATED"
+            row = conn.execute("SELECT state FROM incident WHERE id = ?", (incident_id,)).fetchone()
+            assert row["state"] != "CLOSED"
+            assert _audits(conn, "incident_closed") == []
+            conn.close()
+    conn = connect(path)
+    assert _audits(conn, "original_disposition")  # fresh outcome audits are not suppressed
     conn.close()

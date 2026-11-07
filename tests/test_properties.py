@@ -212,7 +212,7 @@ class _Client:
                     posted_at=None,
                     source_type="PAYOUT",
                     transaction_type="PAYOUT_REVERSAL",
-                    account_type=None,
+                    account_type="CASH",
                     reference=None,
                 ),
             ),

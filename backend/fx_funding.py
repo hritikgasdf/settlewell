@@ -60,8 +60,8 @@ class FundingResult:
 def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> FundingResult:
     """Plan EUR cover from the LIVE original transfer: amount + fee estimate + floor.
 
-    Planning only: no conversion, no payout. The fee is the original transfer's own fee
-    (`original_transfer_estimate`), not a bank quote. Anything missing or unknown raises FundingError.
+    Planning only: no conversion, no payout. The fee is the conservative fallback
+    budget (`conservative_upper_bound_estimate`), not a bank quote. Anything missing or unknown raises FundingError.
     A top-up above the limit is not sent."""
     from backend.funding import _READ_ERRORS, _decimal, _fee_estimate
 

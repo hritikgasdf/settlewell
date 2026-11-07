@@ -19,7 +19,7 @@ from backend.reconcile import _read_outcome
 from backend.replace_payment import ReplaceError
 
 
-def _item(id="rev", *, source="awx-hero", amount="4200.00", currency="EUR", kind="PAYOUT_REVERSAL", cls=BalanceHistoryItem, **extra):
+def _item(id="rev", *, source="awx-hero", amount="4200.00", currency="EUR", kind="PAYOUT_REVERSAL", cls=BalanceHistoryItem, account_type="CASH", **extra):
     return cls(
         id=id,
         source=source,
@@ -31,7 +31,7 @@ def _item(id="rev", *, source="awx-hero", amount="4200.00", currency="EUR", kind
         posted_at=None,
         source_type="PAYOUT",
         transaction_type=kind,
-        account_type=None,
+        account_type=account_type,
         reference="INV-2291",
         **extra,
     )
@@ -221,12 +221,20 @@ def test_history_errors_are_explicit():
 # --- review 1: real parser, malformed evidence, bound durable verification ---
 
 
-def _wire(status="__absent__", *, amount="4200.00", currency="EUR", id="rev", source="awx-hero", kind="PAYOUT_REVERSAL"):
+def _wire_raw(status="__absent__", *, amount="4200.00", currency="EUR", id="rev", source="awx-hero", kind="PAYOUT_REVERSAL", account_type="__absent__"):
     """A history row as the endpoint returns it, parsed by the real adapter parser."""
     data = {"id": id, "source": source, "amount": amount, "currency": currency, "transaction_type": kind}
     if status != "__absent__":
         data["status"] = status
+    if account_type != "__absent__":
+        data["account_type"] = account_type
     return parse_history_item(data)
+
+
+def _wire(status="__absent__", **kw):
+    """Like _wire_raw, but a CASH credit unless the test says otherwise."""
+    kw.setdefault("account_type", "CASH")
+    return _wire_raw(status, **kw)
 
 
 def test_the_parser_keeps_the_status_the_endpoint_returned():
@@ -335,3 +343,60 @@ def test_an_earlier_verification_is_bound_to_the_principal(tmp_path):
     other = _Down([], source_amount=Decimal("4620.00"), source_currency="USD")
     assert _outcome(path, other, obligation_id, incident_id)[0].returned is False
     assert _outcome(path, _Down([]), obligation_id, incident_id)[0].returned is True
+
+
+# --- PR43 item 3: only a CASH credit is a refund ---
+
+_NONCASH = ["CREDIT", "YIELD", "credit", "yield", "", "  ", "SAVINGS", None]
+
+
+@pytest.mark.parametrize("kind", ["CASH", "cash", " Cash "])
+def test_a_cash_credit_in_any_case_unlocks(kind):
+    _pays([_item(account_type=kind)])
+    _pays([_wire(account_type=kind)])
+
+
+@pytest.mark.parametrize("kind", _NONCASH)
+def test_a_noncash_or_unknown_account_type_never_unlocks_even_with_cash_available(kind):
+    _refused([_item(account_type=kind)])
+    _refused([_wire_raw() if kind is None else _wire_raw(account_type=kind)])
+
+
+def test_the_parser_never_defaults_a_missing_account_type_to_cash():
+    assert _wire_raw().account_type is None
+    assert (_wire_raw(account_type="").account_type or "").strip().lower() != "cash"
+    _refused([_wire_raw()])
+
+
+@pytest.mark.parametrize("kind", ["CREDIT", "YIELD", None, ""])
+def test_a_noncash_reversal_is_not_a_return_but_is_still_a_reversal(kind):
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    row = conn.execute("SELECT * FROM transfer_record WHERE airwallex_id = 'awx-hero'").fetchone()
+    obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
+    client = Book([_item(account_type=kind)])
+    assert reversal_for(client, "awx-hero", "EUR") is not None
+    assert original_returned(client, row) is False
+    out, _ = _read_outcome(conn, client, incident_id, obligation, row, {}, True, SEEN)
+    assert out.reversed is True and out.returned is False
+
+
+def test_cash_then_noncash_then_cash_across_restart_pays_once(tmp_path):
+    path, obligation_id, incident_id = _file_ledger(tmp_path)
+    assert _outcome(path, Book([_item()]), obligation_id, incident_id)[0].returned is True
+    out, _ = _outcome(path, Book([_item(account_type="YIELD")]), obligation_id, incident_id)
+    assert out.returned is False and out.reversed is True
+    conn = connect(path)
+    ref = _grant(conn, incident_id)
+    held = Book([_item(account_type="YIELD")])
+    with pytest.raises(ReplaceError) as caught:
+        execute(conn, held, ref.id, as_of=SEEN)
+    assert caught.value.code == "refund"
+    assert held.created == [] and held.conversions == []
+    assert conn.execute("SELECT state FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()["state"] != "executed"
+    conn.close()
+
+    conn = connect(path)
+    cash = Book([_item()])
+    assert execute(conn, cash, ref.id, as_of=SEEN).remote_id == "awx-new"
+    assert len(cash.created) == 1 and cash.conversions == []

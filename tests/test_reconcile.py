@@ -33,7 +33,7 @@ def _reversal() -> BalanceHistoryItem:
         posted_at="2026-11-03T12:00:00+00:00",
         source_type="PAYOUT",
         transaction_type="PAYOUT_REVERSAL",
-        account_type=None,
+        account_type="CASH",
         reference="INV-2291",
     )
 

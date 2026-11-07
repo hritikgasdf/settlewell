@@ -3,9 +3,12 @@
 The gate runs under the replacement's write lock, after the exact-intent checks and before the
 claim is stored. A refusal leaves the intent proposed and the approval usable.
 
-Fee limit: the adapter has no verified pre-send fee endpoint. The budget is the original
-transfer's own fee, labelled `original_transfer_estimate`. It cannot guarantee future bank pricing.
-A larger actual fee is audited, never resent.
+Fee budget: the adapter has no verified pre-send fee endpoint. Unless a client supplies an optional,
+read-only `quote_payout_fee`, the budget is a coded conservative estimate,
+`conservative_upper_bound_estimate` = max(2 x the live original fee, 25.00 payout-currency units) for
+EUR/USD/GBP. It is not a bank-enforced cap and cannot guarantee future bank pricing. A quote that is
+present but malformed, expired, errored or for other terms holds the payout; it never falls back.
+A larger actual fee is audited and escalated, never resent.
 
 Holds: every unresolved or accepted send keeps its amount plus fee budget out of the live balance
 until a definitive first-send refusal releases it. A read never releases a hold, because no debit
@@ -15,6 +18,7 @@ attribution proves the payout is already inside the balance the next sender woul
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from backend.airwallex.client import AirwallexError
@@ -23,10 +27,15 @@ from backend.ledger import append_audit, set_obligation_status
 from backend.outcomes import HistoryError, full_refund, refund_currency, reversals_for
 from backend.replace_payment import ReplaceError
 
-FEE_SOURCE = "original_transfer_estimate"
+FEE_SOURCE = "conservative_upper_bound_estimate"
+QUOTE_SOURCE = "adapter_fee_quote"
+FEE_MULTIPLE = Decimal(2)
+FEE_MINIMUM = Decimal("25.00")
+FEE_CURRENCIES = frozenset({"EUR", "USD", "GBP"})
+FEE_POLICY = "max(2 x live original fee, 25.00 payout-currency units); EUR/USD/GBP only"
 FEE_NOTICE = (
-    "Fee budget is the original transfer's fee (original_transfer_estimate), not a bank quote; "
-    "it cannot guarantee future bank pricing."
+    "Fee budget is a conservative upper-bound estimate (conservative_upper_bound_estimate), not a bank "
+    "quote or cap; it cannot guarantee future bank pricing. Only the actual fee is charged."
 )
 _FINAL = frozenset({"FAILED", "CANCELLED"})
 _READ_ERRORS = (AirwallexError, TimeoutError, OSError, HistoryError)
@@ -90,6 +99,54 @@ def cash_available(balances, currency: str) -> Decimal:
 
 
 def _fee_estimate(remote, currency: str) -> tuple[Decimal, str] | None:
+    """The conservative fallback budget, or None when the original fee or currency is unsupported."""
+    if currency not in FEE_CURRENCIES:
+        return None
+    original = _original_fee(remote, currency)
+    if original is None:
+        return None
+    return max(original[0] * FEE_MULTIPLE, FEE_MINIMUM), original[1]
+
+
+def _parse_time(value) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def _quoted_fee(client, *, beneficiary_id, amount: Decimal, currency: str, method, as_of: str):
+    """(fee, currency) from the optional read-only quote seam, or None when the client has none.
+
+    Raises ValueError when a quote exists but is unreadable, expired, unattributed or for other terms."""
+    quoter = getattr(client, "quote_payout_fee", None)
+    if quoter is None:
+        return None
+    try:
+        quote = quoter(
+            beneficiary_id=beneficiary_id, transfer_amount=amount, transfer_currency=currency, transfer_method=method
+        )
+        fee = _decimal(quote.fee_amount)
+        valid_to = _parse_time(quote.valid_to_at)
+        now = _parse_time(as_of)
+        if (
+            fee is None or fee < 0
+            or quote.fee_currency != currency
+            or quote.beneficiary_id != beneficiary_id
+            or _decimal(quote.transfer_amount) != amount
+            or quote.transfer_currency != currency
+            or not method or quote.transfer_method != method
+            or not getattr(quote, "source", None)
+            or valid_to is None or now is None or valid_to <= now
+        ):
+            raise ValueError("quote")
+    except (*_READ_ERRORS, AttributeError, TypeError, ValueError):
+        raise ValueError("quote") from None
+    return fee, currency
+
+
+def _original_fee(remote, currency: str) -> tuple[Decimal, str] | None:
     fee = _decimal(remote.fee_amount)
     if fee is None or fee < 0:
         return None
@@ -147,7 +204,10 @@ def _settle_conversion(conn, client, quote_id: str, incident_id, obligation_id) 
     return status
 
 
-def gate(conn, client, *, obligation, intent_id: int, request_id: str, amount: Decimal, currency: str, as_of: str) -> None:
+def gate(
+    conn, client, *, obligation, intent_id: int, request_id: str, amount: Decimal, currency: str, as_of: str,
+    beneficiary_id: str | None = None, transfer_method: str | None = None,
+) -> None:
     """Raise ReplaceError unless this payout is refunded, bound to the live original, and funded.
 
     Stores the preflight, the before snapshot, and the hold. The caller commits them with the claim."""
@@ -177,10 +237,18 @@ def gate(conn, client, *, obligation, intent_id: int, request_id: str, amount: D
         _refuse(conn, "refund", incident_id, as_of, reason="history", **base)
     if full_refund(remote, reversals) is None:
         _refuse(conn, "refund", incident_id, as_of, **base)
-    estimate = _fee_estimate(remote, currency)
+    try:
+        quoted = _quoted_fee(
+            client, beneficiary_id=beneficiary_id, amount=amount, currency=currency,
+            method=transfer_method or remote.transfer_method, as_of=as_of,
+        )
+    except ValueError:
+        _refuse(conn, "fee", incident_id, as_of, reason="quote", **base)
+    estimate = quoted or _fee_estimate(remote, currency)
     if estimate is None:
         _refuse(conn, "fee", incident_id, as_of, **base)
     fee, fee_currency = estimate
+    fee_source = QUOTE_SOURCE if quoted else FEE_SOURCE
     try:
         floor = reserve_floor()
     except (FundingError, InvalidOperation):
@@ -218,7 +286,7 @@ def gate(conn, client, *, obligation, intent_id: int, request_id: str, amount: D
         """,
         (
             request_id, intent_id, incident_id, obligation["id"], currency, format(amount, "f"),
-            format(fee, "f"), fee_currency, FEE_SOURCE, format(floor, "f"), format(available, "f"), as_of,
+            format(fee, "f"), fee_currency, fee_source, format(floor, "f"), format(available, "f"), as_of,
         ),
     )
     conn.execute(
@@ -232,7 +300,8 @@ def gate(conn, client, *, obligation, intent_id: int, request_id: str, amount: D
         detail=json.dumps(
             {
                 **base, "amount": format(amount, "f"), "currency": currency, "fee_budget": format(fee, "f"),
-                "fee_currency": fee_currency, "fee_source": FEE_SOURCE, "reserve_floor": format(floor, "f"),
+                "fee_currency": fee_currency, "fee_source": fee_source,
+                "fee_policy": "adapter quote" if quoted else FEE_POLICY, "reserve_floor": format(floor, "f"),
                 "available_before": format(available, "f"), "held_by_others": format(held, "f"),
                 "fee_notice": FEE_NOTICE,
             },
@@ -412,5 +481,6 @@ def note_for_intent(conn, intent_id: int) -> str | None:
         return None
     return (
         f"Funding checked live: available before {row['available_before']} {row['currency']}, "
-        f"reserve {row['reserve_floor']}, fee budget {row['fee_budget']} {row['fee_currency']}. {FEE_NOTICE}"
+        f"reserve {row['reserve_floor']}, fee budget {row['fee_budget']} {row['fee_currency']} ({row['fee_source']}). "
+        f"{FEE_NOTICE}"
     )

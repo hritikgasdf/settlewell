@@ -3,6 +3,7 @@
 import json
 import threading
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from test_execute import SEEN, Pay, _grant, _ready
@@ -18,7 +19,7 @@ from backend.execute import execute
 from backend.ledger import connect, migrate
 from backend.replace_payment import ReplaceError, replace_payment
 
-NEED = Decimal("4200.00") + Decimal("13.47") + Decimal("1000.00")  # amount + fee estimate + default floor
+NEED = Decimal("5226.94")  # 4200.00 + fee budget 26.94 (2 x 13.47 original fee) + 1000.00 default floor
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +73,7 @@ class Funded(Pay):
                 BalanceHistoryItem(
                     id=f"rev-{source}", source=source, amount=Decimal(amount), currency="EUR", balance=None,
                     description=None, fee=Decimal(0), posted_at=None, source_type="PAYOUT",
-                    transaction_type="PAYOUT_REVERSAL", account_type=None, reference="INV-2291",
+                    transaction_type="PAYOUT_REVERSAL", account_type="CASH", reference="INV-2291",
                 )
                 for source, amount in self.originals.items()
             )
@@ -136,8 +137,8 @@ def test_exactly_the_threshold_pays_and_records_the_preflight():
     result = execute(conn, client, ref.id, as_of=SEEN)
     assert result.remote_id == "awx-new" and len(client.created) == 1
     row = conn.execute("SELECT * FROM payout_funding").fetchone()
-    assert (row["amount"], row["currency"], row["fee_budget"], row["fee_currency"]) == ("4200.00", "EUR", "13.47", "EUR")
-    assert row["fee_source"] == "original_transfer_estimate"
+    assert (row["amount"], row["currency"], row["fee_budget"], row["fee_currency"]) == ("4200.00", "EUR", "26.94", "EUR")
+    assert row["fee_source"] == "conservative_upper_bound_estimate"
     assert (row["reserve_floor"], row["available_before"]) == ("1000.00", str(NEED))
     assert row["request_id"] == client.created[0]["request_id"]
     assert row["intent_id"] == ref.id and row["incident_id"] and row["obligation_id"]
@@ -148,7 +149,7 @@ def test_exactly_the_threshold_pays_and_records_the_preflight():
     ]
     kinds = {r["kind"] for r in conn.execute("SELECT kind FROM audit_event")}
     assert {"payout_funding_preflight", "payout_after_observed"} <= kinds
-    assert "cannot guarantee" in result.funding_note and "original_transfer_estimate" in result.funding_note
+    assert "cannot guarantee" in result.funding_note and "conservative_upper_bound_estimate" in result.funding_note
 
 
 @pytest.mark.parametrize(
@@ -156,6 +157,7 @@ def test_exactly_the_threshold_pays_and_records_the_preflight():
     [
         (str(NEED - Decimal("0.01")), None),  # one cent short
         ("5200.00", None),  # covers amount, not fee estimate plus floor
+        ("5213.47", None),  # the old amount + 13.47 + floor is no longer enough
         (str(NEED), "1000.01"),  # floor raised
     ],
 )
@@ -294,13 +296,115 @@ def test_an_after_read_failure_keeps_the_send_and_a_restart_backfills_once(tmp_p
     assert [r["available"] for r in after] == ["5000.00"]
 
 
-def test_an_actual_fee_over_budget_is_audited_and_never_resent():
+def test_an_actual_fee_above_the_old_fee_but_inside_the_budget_pays_without_escalation():
     conn, client, ref = _setup(actual_fee="20.00")
     assert execute(conn, client, ref.id, as_of=SEEN).remote_id == "awx-new"
+    row = conn.execute("SELECT actual_fee, fee_budget FROM payout_funding").fetchone()
+    assert (row["actual_fee"], row["fee_budget"]) == ("20.00", "26.94")
+    assert conn.execute("SELECT COUNT(*) FROM audit_event WHERE kind = 'payout_fee_over_budget'").fetchone()[0] == 0
+    assert conn.execute("SELECT status FROM obligation WHERE invoice_ref = 'INV-2291'").fetchone()[0] != "ESCALATED"
+
+
+def test_a_zero_original_fee_still_needs_the_25_minimum_budget():
+    need = Decimal("4200.00") + Decimal("25.00") + Decimal("1000.00")
+    conn, client, ref = _setup(fee="0", balances=[rows(str(need - Decimal("0.01")))])
+    _refused(conn, client, ref, "balance")
+    conn, client, ref = _setup(fee="0", balances=[rows(str(need))])
+    execute(conn, client, ref.id, as_of=SEEN)
+    assert conn.execute("SELECT fee_budget FROM payout_funding").fetchone()[0] == "25.00"
+
+
+def test_a_large_original_fee_doubles():
+    conn, client, ref = _setup(fee="40.00", balances=[rows("5280.00")])  # 4200 + 80 + 1000
+    execute(conn, client, ref.id, as_of=SEEN)
+    assert conn.execute("SELECT fee_budget FROM payout_funding").fetchone()[0] == "80.00"
+
+
+def test_an_unsupported_currency_has_no_fallback_budget():
+    from backend.funding import _fee_estimate
+
+    remote = Transfer(
+        id="x", status="CANCELLED", request_id="r", transfer_amount=Decimal(1),
+        transfer_currency="JPY", fee_amount=Decimal(1), fee_currency="JPY",
+    )
+    assert _fee_estimate(remote, "JPY") is None
+
+
+def _quote(client, **overrides):
+    def quoter(**kwargs):
+        fields = {
+            "fee_amount": Decimal("30.00"), "fee_currency": "EUR", "beneficiary_id": kwargs["beneficiary_id"],
+            "transfer_amount": kwargs["transfer_amount"], "transfer_currency": kwargs["transfer_currency"],
+            "transfer_method": kwargs["transfer_method"], "valid_to_at": "2999-01-01T00:00:00+00:00",
+            "source": "test-offline-quote",
+        }
+        fields.update(overrides)
+        client.quote_calls.append(kwargs)
+        return SimpleNamespace(**fields)
+
+    client.quote_calls = []
+    client.quote_payout_fee = quoter
+
+
+def test_a_valid_quote_for_the_exact_new_payout_overrides_the_fallback():
+    conn, client, ref = _setup(balances=[rows("5230.00")])  # 4200 + quoted 30 + 1000
+    _quote(client)
+    execute(conn, client, ref.id, as_of=SEEN)
+    row = conn.execute("SELECT fee_budget, fee_source FROM payout_funding").fetchone()
+    assert (row["fee_budget"], row["fee_source"]) == ("30.00", "adapter_fee_quote")
+    call = client.quote_calls[0]
+    assert (call["transfer_amount"], call["transfer_currency"], call["transfer_method"]) == (
+        Decimal("4200.00"), "EUR", client.created[0]["transfer_method"],
+    )
+    assert call["beneficiary_id"] == client.created[0]["beneficiary_id"]
+
+
+def test_a_quote_the_balance_cannot_cover_holds():
+    conn, client, ref = _setup(balances=[rows("5229.99")])
+    _quote(client)
+    _refused(conn, client, ref, "balance")
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"beneficiary_id": "ben-other"},
+        {"transfer_amount": Decimal("4200.01")},
+        {"transfer_currency": "USD"},
+        {"transfer_method": "LOCAL"},
+        {"fee_currency": "USD"},
+        {"fee_amount": None},
+        {"fee_amount": Decimal(-1)},
+        {"valid_to_at": "2000-01-01T00:00:00+00:00"},  # stale
+        {"valid_to_at": "garbage"},
+        {"source": ""},
+    ],
+)
+def test_a_wrong_stale_or_malformed_quote_holds_and_never_falls_back(override):
+    conn, client, ref = _setup()
+    _quote(client, **override)
+    _refused(conn, client, ref, "fee")
+
+
+def test_a_quote_that_errors_holds_and_never_falls_back():
+    conn, client, ref = _setup()
+
+    def broken(**_kwargs):
+        raise TimeoutError("slow")
+
+    client.quote_payout_fee = broken
+    _refused(conn, client, ref, "fee")
+
+
+def test_an_actual_fee_over_budget_is_audited_and_never_resent():
+    conn, client, ref = _setup(actual_fee="40.00")
+    assert execute(conn, client, ref.id, as_of=SEEN).remote_id == "awx-new"
     row = conn.execute("SELECT actual_fee, actual_fee_currency FROM payout_funding").fetchone()
-    assert (row["actual_fee"], row["actual_fee_currency"]) == ("20.00", "EUR")
+    assert (row["actual_fee"], row["actual_fee_currency"]) == ("40.00", "EUR")
     detail = conn.execute("SELECT detail FROM audit_event WHERE kind = 'payout_fee_over_budget'").fetchone()
-    assert detail and json.loads(detail["detail"])["budget"] == "13.47"
+    assert detail and json.loads(detail["detail"])["budget"] == "26.94"
+    audit = conn.execute("SELECT detail FROM audit_event WHERE kind = 'payout_funding_preflight'").fetchone()
+    assert json.loads(audit["detail"])["fee_policy"].startswith("max(2 x live original fee")
     assert conn.execute("SELECT status FROM obligation WHERE invoice_ref = 'INV-2291'").fetchone()[0] == "ESCALATED"
     assert conn.execute("SELECT COUNT(*) FROM audit_event WHERE kind = 'payout_escalated'").fetchone()[0] == 1
     execute(conn, client, ref.id, as_of=SEEN)

@@ -103,6 +103,7 @@ def replace_payment(
             funding.gate(
                 conn, client, obligation=obligation, intent_id=intent_id, request_id=request_id,
                 amount=amount, currency=currency, as_of=as_of,
+                beneficiary_id=beneficiary_id, transfer_method=transfer_method,
             )
 
         try:
@@ -259,14 +260,20 @@ def _create_or_find(
     except AirwallexError as error:
         if error.code != "duplicate_request_id":
             raise
-        return _lookup(client, request_id)
     except TimeoutError:
-        return _lookup(client, request_id)
+        pass
+    # Only the exact attempt's transfer may be bound; anything else stays unknown.
+    from backend import funding
 
-
-def _lookup(client, request_id: str):
     found = _lookup_optional(client, request_id)
-    if found is None:
+    if found is None or not funding.terms_match(
+        found,
+        request_id=request_id,
+        invoice_ref=obligation["invoice_ref"],
+        amount=amount,
+        currency=currency,
+        beneficiary_id=beneficiary_id,
+    ):
         raise ReplaceError("unknown")
     return found
 
@@ -276,7 +283,7 @@ def _lookup_optional(client, request_id: str):
         page = client.list_transfers(request_id=request_id)
     except (AirwallexError, TimeoutError):
         raise ReplaceError("unknown") from None
-    if len(page.items) != 1:
+    if len(page.items) != 1 or page.page_after:
         return None
     return page.items[0]
 

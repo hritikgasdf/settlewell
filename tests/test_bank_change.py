@@ -43,6 +43,12 @@ class Desk:
         self.created: list[dict] = []
         self.updated: list[dict] = []
         self.paid: list[dict] = []
+        self.cash = Decimal("100000.00")
+
+    def current_balances(self):
+        from backend.airwallex.types import Balance
+
+        return [Balance("EUR", self.cash, Decimal(0), Decimal(0), self.cash, Decimal(0), account_type="cash")]
 
     def validate_beneficiary(self, body: dict) -> BeneficiaryValidation:
         self.validated.append(body)
@@ -82,7 +88,7 @@ class Desk:
                     posted_at=None,
                     source_type="PAYOUT",
                     transaction_type="PAYOUT_REVERSAL",
-                    account_type=None,
+                    account_type="CASH",
                     reference="INV-2291",
                 ),
             ),
@@ -92,12 +98,15 @@ class Desk:
 
     def create_transfer(self, **kwargs):
         self.paid.append(kwargs)
+        self.cash -= kwargs["transfer_amount"] + Decimal("13.47")  # honest debit: principal + fee
         return Transfer(
             id="awx-new",
             status="SCHEDULED",
             request_id=kwargs["request_id"],
             transfer_amount=kwargs["transfer_amount"],
             transfer_currency=kwargs["transfer_currency"],
+            fee_amount=Decimal("13.47"),
+            fee_currency="EUR",
             reference="INV-2291",
         )
 
@@ -295,3 +304,4 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
     )
     assert paid == "awx-new"
     assert client.paid[0]["beneficiary_id"] == "ben_dkb"
+    assert client.cash == Decimal("100000.00") - Decimal("4200.00") - Decimal("13.47")

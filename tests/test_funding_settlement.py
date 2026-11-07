@@ -14,7 +14,7 @@ from backend.fx_funding import FundingError, fund_replacement, reserve_floor
 from backend.ledger import connect
 from backend.replace_payment import ReplaceError
 
-NEED = Decimal("4200.00") + Decimal("13.47") + Decimal("1000.00")
+NEED = Decimal("5226.94")  # 4200.00 + budget 26.94 (2 x 13.47 original fee) + 1000.00 floor
 
 
 class Fx(Funded):
@@ -125,7 +125,7 @@ def test_planning_uses_the_live_original_amount_and_fee_not_the_local_amount():
     obligation_id, _incident = _ready(conn)
     assert conn.execute("SELECT amount FROM obligation").fetchone()["amount"] == "4200.00"
     result = fund_replacement(conn, client, obligation_id=obligation_id, as_of=SEEN)
-    expected = Decimal("4300.00") + Decimal("13.47") + Decimal("1000.00") - Decimal("800.00")
+    expected = Decimal("4300.00") + Decimal("26.94") + Decimal("1000.00") - Decimal("800.00")
     assert result.buy_amount == expected
     assert client.quote_calls[0]["buy_amount"] == expected
     assert client.conversions == [] and client.created == []

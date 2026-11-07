@@ -93,10 +93,14 @@ class HeroReplay:
     second_replacement: str
     paid_once: bool
     incident_cost: str
-    eur_before: str
-    eur_after: str
+    eur_before: str  # opening cash, before the FX top-up
+    eur_after_fx: str  # cash after the settled conversion, before the payout
+    eur_after: str  # cash after the payout debited principal + fee
     usd_before: str
     usd_after: str
+
+
+PAYOUT_FEE = Decimal("13.47")  # the ACTUAL fee the fake bank debits; the gate budgets 26.94, never debited
 
 
 class HeroBook:
@@ -172,7 +176,7 @@ class HeroBook:
             posted_at=SEEN,
             source_type="PAYOUT",
             transaction_type="PAYOUT_REVERSAL",
-            account_type=None,
+            account_type="cash",
             reference="INV-2291",
         )
         return BalanceHistoryPage(items=(item,), has_more=False, page_after=None)
@@ -251,11 +255,13 @@ class HeroBook:
             request_id=request_id,
             transfer_amount=transfer_amount,
             transfer_currency=transfer_currency,
-            fee_amount=Decimal("0.00"),
+            fee_amount=PAYOUT_FEE,
+            fee_currency=transfer_currency,
             reference=reference,
             beneficiary_id=beneficiary_id,
             transfer_method="SWIFT",
         )
+        self.eur -= transfer_amount + PAYOUT_FEE  # an honest debit: principal plus fee
         self.created.append(transfer)
         return transfer
 
@@ -633,18 +639,29 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         "SELECT fee, status FROM transfer_record WHERE airwallex_id = ?",
         (DUP_ID,),
     ).fetchone()
-    balances = {
-        (row["currency"], row["label"]): row["available"]
-        for row in conn.execute("SELECT currency, label, available FROM balance_snapshot")
+    # Three honest points: opening (fx_funding snapshot, no request id), after the FX top-up and
+    # before the payout (the gate's own 'before'), and after the payout (observed by the gate).
+    opening = {
+        row["currency"]: row["available"]
+        for row in conn.execute(
+            "SELECT currency, available FROM balance_snapshot WHERE label = 'before' AND request_id IS NULL"
+        )
     }
+    gate = {
+        row["label"]: row["available"]
+        for row in conn.execute(
+            "SELECT label, available FROM balance_snapshot WHERE currency = 'EUR' AND request_id IS NOT NULL"
+        )
+    }
+    usd_after = format(book.usd, "f")
     beats.append(
         Beat(
             "Ledger",
             (
                 f"{obligation['invoice_ref']} {obligation['status'].replace('_', ' ').lower()}.",
                 f"Incident cost €{fee}. Duplicate fee €{dup_fee['fee']}.",
-                f"EUR before {balances[('EUR', 'before')]} after {balances[('EUR', 'after')]}.",
-                f"USD before {balances[('USD', 'before')]} after {balances[('USD', 'after')]}.",
+                f"EUR opening {opening['EUR']}, after FX {gate['before']}, after payout {gate['after']}.",
+                f"USD before {opening['USD']} after {usd_after}.",
             ),
         )
     )
@@ -667,10 +684,11 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         second_replacement=second,
         paid_once=obligation["status"] == "PAID_ONCE",
         incident_cost=fee,
-        eur_before=balances[("EUR", "before")],
-        eur_after=balances[("EUR", "after")],
-        usd_before=balances[("USD", "before")],
-        usd_after=balances[("USD", "after")],
+        eur_before=opening["EUR"],
+        eur_after_fx=gate["before"],
+        eur_after=gate["after"],
+        usd_before=opening["USD"],
+        usd_after=usd_after,
     )
 
 
@@ -729,6 +747,7 @@ def _balance(currency: str, available: Decimal) -> Balance:
         reserved_amount=Decimal(0),
         total_amount=available,
         prepayment_amount=Decimal(0),
+        account_type="cash",
     )
 
 
