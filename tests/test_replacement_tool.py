@@ -85,6 +85,12 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
         "UPDATE transfer_record SET request_id = 'original-payment', status = 'CANCELLED'"
     )
     conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        SELECT id, 'CANCELLED', 'poll', '2026-11-03T12:00:00+00:00' FROM transfer_record
+        """
+    )
+    conn.execute(
         "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
     )
     supplier_id = conn.execute(

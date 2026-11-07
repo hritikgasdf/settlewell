@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from backend.airwallex.types import BalanceHistoryPage
+from backend.paid_once import find_matches, scan_paid_once
 from backend.policy import Action, code_from_reason, decide
 from backend.repaid import colleague_repaid
 from backend.replace_payment import (
@@ -44,6 +45,36 @@ def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
     return RefundCard(True, text)
 
 
+def _own_attempt_recorded(conn, intent_id: int | None) -> bool:
+    """Our stored request id is recovered by replace_payment, which validates ownership read-only first.
+    The colleague scan must not see our accepted payment as external."""
+    if intent_id is None:
+        return False
+    row = conn.execute(
+        """
+        SELECT transfer_record.id FROM execution_intent
+        JOIN transfer_record ON transfer_record.request_id = execution_intent.request_id
+        WHERE execution_intent.id = ? AND execution_intent.state = 'executed'
+        """,
+        (intent_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _refuse_on_scan(conn, client, obligation_id: int, incident_ref: str) -> None:
+    """One complete supplier-aware scan. Any match or ambiguity refuses before the payout."""
+    matches = find_matches(conn, client, obligation_id)
+    if not matches:
+        return
+    decision = colleague_repaid(
+        conn, client, obligation_id=obligation_id, incident_ref=incident_ref, matches=matches
+    )
+    if decision.action == "replace":
+        # Original not yet cancelled or unlinked: still record the matches, never send.
+        scan_paid_once(conn, client, obligation_id, matches)
+    raise ReplaceError("repaid")
+
+
 def propose_replacement(
     conn,
     client,
@@ -62,9 +93,8 @@ def propose_replacement(
     card = refund_card(conn, client, obligation_id=obligation_id)
     if not card.unlocked:
         raise ReplaceError("refund")
-    decision = colleague_repaid(conn, client, obligation_id=obligation_id, incident_ref=incident_ref)
-    if decision.action != "replace":
-        raise ReplaceError("repaid")
+    if not _own_attempt_recorded(conn, intent_id):
+        _refuse_on_scan(conn, client, obligation_id, incident_ref)
     original = conn.execute(
         "SELECT * FROM transfer_record WHERE id = ?",
         (obligation["live_transfer_id"],),
@@ -107,7 +137,7 @@ def propose_replacement(
         conn,
         client,
         obligation_id=obligation_id,
-        attempt=_attempt_for(conn, obligation["invoice_ref"], intent["request_id"]),
+        attempt=_attempt_for(conn, obligation["invoice_ref"], int(intent["id"])),
         beneficiary_id=beneficiary_id,
         details_hash=details_hash,
         transfer_method=remote.transfer_method or "SWIFT",
@@ -121,14 +151,25 @@ def propose_replacement(
     )
 
 
-def _attempt_for(conn, invoice_ref: str, recorded: str | None) -> int:
-    """Resume the request id stored before the call. Do not mint the next attempt."""
+def _attempt_for(conn, invoice_ref: str, intent_id: int) -> int:
+    """Resume the request id stored before the call. Do not mint the next attempt.
+
+    The stored id is read again under the write lock. A copy read earlier can be stale:
+    a concurrent worker for this same intent may have recorded attempt 1 since."""
     prefix = replacement_request_id(invoice_ref, 1).rsplit("-", 1)[0] + "-"
-    if recorded and recorded.startswith(prefix):
-        suffix = recorded[len(prefix) :]
-        if suffix.isdigit():
-            return int(suffix)
-    return _next_attempt(conn, invoice_ref)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT request_id FROM execution_intent WHERE id = ?", (intent_id,)
+        ).fetchone()
+        recorded = row["request_id"] if row is not None else None
+        if recorded and recorded.startswith(prefix):
+            suffix = recorded[len(prefix) :]
+            if suffix.isdigit():
+                return int(suffix)
+        return _next_attempt(conn, invoice_ref)
+    finally:
+        conn.rollback()
 
 
 def _next_attempt(conn, invoice_ref: str) -> int:

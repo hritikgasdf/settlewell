@@ -5,12 +5,43 @@ from __future__ import annotations
 from decimal import Decimal
 
 from backend.ledger import insert_external_transfer, open_duplicate_incident
+from backend.replace_payment import ReplaceError
 
 _LIVE = frozenset({"SCHEDULED", "PROCESSING", "SENT", "PAID", "OVERDUE"})
 
 
-def scan_paid_once(conn, client, obligation_id: int) -> list[int]:
-    """Read every transfer page. Match this supplier's beneficiary versions and invoice."""
+def scan_paid_once(conn, client, obligation_id: int, matches=None) -> list[int]:
+    """Record each match and open its own incident. Pass matches to reuse one scan."""
+    if matches is None:
+        matches = find_matches(conn, client, obligation_id)
+    obligation = conn.execute(
+        "SELECT id, invoice_ref, amount, currency FROM obligation WHERE id = ?",
+        (obligation_id,),
+    ).fetchone()
+    opened: list[int] = []
+    for kind, remote in matches:
+        insert_external_transfer(
+            conn,
+            airwallex_id=remote.id,
+            request_id=remote.request_id,
+            obligation_id=obligation["id"],
+            amount=format(remote.transfer_amount, "f") if remote.transfer_amount is not None else obligation["amount"],
+            currency=remote.transfer_currency or obligation["currency"],
+            status=remote.status,
+            reference=remote.reference or obligation["invoice_ref"],
+        )
+        if kind == "duplicate":
+            incident_id = open_duplicate_incident(conn, obligation_id=obligation["id"], airwallex_id=remote.id)
+        else:
+            incident_id = _open_ambiguous(conn, obligation["id"], remote.id)
+        if incident_id is not None:
+            opened.append(incident_id)
+    conn.commit()
+    return opened
+
+
+def find_matches(conn, client, obligation_id: int) -> list[tuple[str, object]]:
+    """Read every transfer page and return (kind, remote) look-alikes. A partial scan raises."""
     obligation = conn.execute(
         "SELECT id, invoice_ref, amount, currency, supplier_id, live_transfer_id FROM obligation WHERE id = ?",
         (obligation_id,),
@@ -22,7 +53,7 @@ def scan_paid_once(conn, client, obligation_id: int) -> list[int]:
             (obligation["live_transfer_id"],),
         ).fetchone()
     versions = _beneficiary_ids(conn, obligation["supplier_id"])
-    opened: list[int] = []
+    found: list[tuple[str, object]] = []
     page_token = None
     seen_pages: set[str] = set()
     target = Decimal(obligation["amount"])
@@ -30,34 +61,14 @@ def scan_paid_once(conn, client, obligation_id: int) -> list[int]:
         page = client.list_transfers(page_size=50, page=page_token)
         for remote in page.items:
             kind = _classify(remote, obligation, live, target, versions)
-            if kind is None:
-                continue
-            insert_external_transfer(
-                conn,
-                airwallex_id=remote.id,
-                request_id=remote.request_id,
-                obligation_id=obligation["id"],
-                amount=format(remote.transfer_amount, "f") if remote.transfer_amount is not None else obligation["amount"],
-                currency=remote.transfer_currency or obligation["currency"],
-                status=remote.status,
-                reference=remote.reference or obligation["invoice_ref"],
-            )
-            if kind == "duplicate":
-                incident_id = open_duplicate_incident(
-                    conn,
-                    obligation_id=obligation["id"],
-                    airwallex_id=remote.id,
-                )
-            else:
-                incident_id = _open_ambiguous(conn, obligation["id"], remote.id)
-            if incident_id is not None:
-                opened.append(incident_id)
-        if not page.page_after or page.page_after in seen_pages:
-            break
+            if kind is not None:
+                found.append((kind, remote))
+        if page.page_after is None:
+            return found
+        if not isinstance(page.page_after, str) or not page.page_after or page.page_after in seen_pages:
+            raise ReplaceError("scan")
         seen_pages.add(page.page_after)
         page_token = page.page_after
-    conn.commit()
-    return opened
 
 
 def _beneficiary_ids(conn, supplier_id: int) -> set[str]:

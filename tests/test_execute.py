@@ -144,6 +144,13 @@ def _ready(conn, *, reason: str = "90701: Account closed"):
         """,
         (reason, reason.split(":", 1)[0]),
     )
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        SELECT id, 'CANCELLED', 'poll', ? FROM transfer_record WHERE airwallex_id = 'awx-hero'
+        """,
+        (SEEN,),
+    )
     supplier_id = conn.execute(
         "SELECT supplier_id FROM obligation WHERE id = ?",
         (obligation_id,),
@@ -379,6 +386,17 @@ def test_free_text_is_not_a_call_back_and_create_waits_for_approval():
     assert len(client.beneficiaries) == 1
 
 
+def _observe_cancelled(conn) -> None:
+    """The original transfer was observed CANCELLED at the fixture clock."""
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        SELECT id, 'CANCELLED', 'poll', ? FROM transfer_record WHERE airwallex_id = 'awx-hero'
+        """,
+        (SEEN,),
+    )
+
+
 def _intent_id(conn) -> int:
     return int(conn.execute("SELECT id FROM execution_intent ORDER BY id DESC LIMIT 1").fetchone()["id"])
 
@@ -397,6 +415,7 @@ def test_same_details_replacement_uses_the_onboarding_beneficiary():
         WHERE airwallex_id = 'awx-hero'
         """
     )
+    _observe_cancelled(conn)
     conn.execute(
         "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
     )
@@ -439,6 +458,7 @@ def test_a_crash_mid_payout_is_recovered_by_request_id():
     conn.execute(
         "UPDATE transfer_record SET status = 'CANCELLED', failure_code = '90802' WHERE airwallex_id = 'awx-hero'"
     )
+    _observe_cancelled(conn)
     conn.execute(
         "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
     )
@@ -507,6 +527,86 @@ def test_a_crash_mid_payout_is_recovered_by_request_id():
         "SELECT airwallex_id FROM transfer_record WHERE request_id = 'stl-inv2291-1'"
     ).fetchone()
     assert attached["airwallex_id"] == "awx-crash"
+
+
+def test_restart_recovers_our_accepted_payout_before_the_colleague_scan(tmp_path):
+    from backend.airwallex.types import Transfer, TransferPage
+
+    path = tmp_path / "restart.db"
+    conn = connect(path)
+    incident_id = seed_hero(conn, airwallex_id="awx-hero")
+    obligation_id = conn.execute(
+        "SELECT obligation_id FROM incident WHERE id = ?",
+        (incident_id,),
+    ).fetchone()["obligation_id"]
+    conn.execute(
+        "UPDATE transfer_record SET status = 'CANCELLED', failure_code = '90802' WHERE airwallex_id = 'awx-hero'"
+    )
+    _observe_cancelled(conn)
+    conn.execute(
+        "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
+    )
+    conn.commit()
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_onboarding",
+        details_hash="onboarding-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(conn, ref.approval_id, intent_terms(conn, ref.id), approver=FINANCE_APPROVER, used_at=SEEN)
+    client = Pay(reason="90802: Beneficiary bank returned")
+    client.get_transfer = _with_beneficiary(client.get_transfer, "ben_onboarding")
+    accepted = []
+
+    def create_transfer(**kwargs):
+        client.created.append(kwargs)
+        accepted.append(
+            Transfer(
+                id="awx-crash",
+                status="SCHEDULED",
+                request_id=kwargs["request_id"],
+                transfer_amount=kwargs["transfer_amount"],
+                transfer_currency=kwargs["transfer_currency"],
+                reference="INV-2291",
+            )
+        )
+        raise RuntimeError("crash")
+
+    def list_transfers(**kwargs):
+        wanted = kwargs.get("request_id")
+        items = tuple(item for item in accepted if wanted is None or item.request_id == wanted)
+        return TransferPage(items=items, page_after=None)
+
+    client.create_transfer = create_transfer
+    client.list_transfers = list_transfers
+
+    with pytest.raises(RuntimeError, match="crash"):
+        execute(conn, client, ref.id, as_of=SEEN)
+    conn.close()
+
+    conn = connect(path)
+    assert len(client.list_transfers(page_size=50, page=None).items) == 1
+
+    recovered = execute(conn, client, ref.id, as_of=SEEN)
+
+    assert recovered.remote_id == "awx-crash"
+    assert len(client.created) == 1
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_id,)).fetchone()["state"] != "CLOSED"
+    assert conn.execute("SELECT id FROM audit_event WHERE kind = 'colleague_repaid'").fetchone() is None
+    rows = conn.execute(
+        "SELECT origin, airwallex_id FROM transfer_record WHERE airwallex_id = 'awx-crash'"
+    ).fetchall()
+    assert [(row["origin"], row["airwallex_id"]) for row in rows] == [("settlewell", "awx-crash")]
+    conn.close()
 
 
 def _with_beneficiary(getter, beneficiary_id: str):
@@ -772,6 +872,44 @@ def test_two_threads_execute_one_replacement(tmp_path):
     assert len(client.created) == 1
 
 
+def test_a_worker_that_read_the_intent_before_the_other_recorded_recovers_attempt_one(
+    tmp_path, monkeypatch
+):
+    """Worker B starts before A records; A finishes before B reads the stored request id."""
+    import backend.replacement_tool as tool
+
+    path = tmp_path / "interleave.db"
+    setup = connect(path)
+    migrate(setup)
+    _obligation_id, incident_id = _ready(setup)
+    ref = _grant(setup, incident_id)
+    setup.close()
+    client = Pay()
+    first = connect(path)
+    second = connect(path)
+    original = tool._attempt_for
+    ran = []
+    started = []
+
+    def run_other_worker_first(*args, **kwargs):
+        if not started:
+            started.append(True)
+            ran.append(execute(first, client, ref.id, as_of=SEEN).remote_id)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "_attempt_for", run_other_worker_first)
+    try:
+        # Worker B has read the intent (no request id yet); worker A then records attempt 1.
+        result = execute(second, client, ref.id, as_of=SEEN).remote_id
+    finally:
+        first.close()
+        second.close()
+
+    assert ran == ["awx-new"]
+    assert result == "awx-new"
+    assert len(client.created) == 1
+
+
 def test_a_raw_beneficiary_intent_cannot_bypass_the_call_back():
     conn = connect()
     obligation_id, incident_id = _ready(conn)
@@ -914,3 +1052,124 @@ def test_a_beneficiary_whose_hash_does_not_match_its_payload_is_refused():
 
     assert caught.value.code == "void"
     assert client.beneficiaries == []
+
+
+def _scan_client(pages: dict, first: str):
+    """Pay whose account listing serves pages keyed by token. Recovery reads by request_id stay empty."""
+    from backend.airwallex.types import TransferPage
+
+    client = Pay()
+
+    def list_transfers(**kwargs):
+        if kwargs.get("request_id"):
+            return TransferPage(items=(), page_after=None)
+        return pages[kwargs.get("page") or first]
+
+    client.list_transfers = list_transfers
+    return client
+
+
+def _extra(transfer_id: str, status: str, **overrides):
+    from backend.airwallex.types import Transfer
+
+    fields = {
+        "id": transfer_id,
+        "status": status,
+        "request_id": "hand-" + transfer_id,
+        "transfer_amount": Decimal("4200.00"),
+        "transfer_currency": "EUR",
+        "reference": "INV-2291",
+        "beneficiary_id": "ben_verified",
+    }
+    fields.update(overrides)
+    return Transfer(**fields)
+
+
+def _refused_untouched(conn, client, ref, incident_id, *, expect_state: str):
+    before = tuple(conn.execute("SELECT * FROM execution_intent WHERE id = ?", (ref.id,)).fetchone())
+    with pytest.raises(ReplaceError):
+        execute(conn, client, ref.id, as_of=SEEN)
+    assert client.created == []
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_id,)).fetchone()["state"] == "OPEN"
+    assert conn.execute("SELECT id FROM incident WHERE state = ?", (expect_state,)).fetchone() is not None
+    # The grant's execution fields (state, request id, remote result) are unchanged.
+    assert tuple(conn.execute("SELECT * FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()) == before
+    assert before[[c[0] for c in conn.execute("SELECT * FROM execution_intent").description].index("state")] == "proposed"
+    assert conn.execute("SELECT id FROM transfer_record WHERE origin = 'settlewell' AND airwallex_id = 'awx-new'").fetchone() is None
+
+
+def test_a_duplicate_after_page_five_blocks_payout():
+    from backend.airwallex.types import TransferPage
+
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    filler = tuple(_extra("f" + str(i), "PAID", reference="INV-" + str(i)) for i in range(50))
+    pages = {str(n): TransferPage(items=filler, page_after=str(n + 1)) for n in range(1, 6)}
+    pages["start"] = TransferPage(items=filler, page_after="1")
+    pages["6"] = TransferPage(items=(_extra("awx-late", "SCHEDULED"),), page_after=None)
+    client = _scan_client(pages, "start")
+    ref = _grant(conn, incident_id)
+
+    _refused_untouched(conn, client, ref, incident_id, expect_state="DUPLICATE")
+
+
+def test_a_paid_known_supplier_payment_after_page_five_closes_and_never_sends():
+    from backend.airwallex.types import TransferPage
+
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    filler = tuple(_extra("f" + str(i), "PAID", reference="INV-" + str(i)) for i in range(50))
+    pages = {str(n): TransferPage(items=filler, page_after=str(n + 1)) for n in range(1, 6)}
+    pages["start"] = TransferPage(items=filler, page_after="1")
+    pages["6"] = TransferPage(items=(_extra("awx-late", "PAID"),), page_after=None)
+    client = _scan_client(pages, "start")
+    ref = _grant(conn, incident_id)
+
+    with pytest.raises(ReplaceError):
+        execute(conn, client, ref.id, as_of=SEEN)
+
+    assert client.created == []
+    assert conn.execute("SELECT state FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()["state"] == "proposed"
+    assert conn.execute("SELECT detail FROM audit_event WHERE kind = 'colleague_repaid'").fetchone()["detail"] == "awx-late"
+
+
+def test_an_ambiguous_supplier_scan_opens_its_own_incident():
+    from backend.airwallex.types import TransferPage
+
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    stray = _extra("awx-stray", "PAID", beneficiary_id="ben_unknown")
+    client = _scan_client({"start": TransferPage(items=(stray,), page_after=None)}, "start")
+    ref = _grant(conn, incident_id)
+    assert conn.execute("SELECT id FROM incident WHERE state = 'AMBIGUOUS'").fetchone() is None
+
+    _refused_untouched(conn, client, ref, incident_id, expect_state="AMBIGUOUS")
+
+
+def test_a_scheduled_colleague_payment_opens_its_own_incident_and_leaves_ours_open():
+    from backend.airwallex.types import TransferPage
+
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    scheduled = _extra("awx-sched", "SCHEDULED")
+    client = _scan_client({"start": TransferPage(items=(scheduled,), page_after=None)}, "start")
+    ref = _grant(conn, incident_id)
+
+    _refused_untouched(conn, client, ref, incident_id, expect_state="DUPLICATE")
+
+
+def test_a_repeated_continuation_fails_closed():
+    from backend.airwallex.types import TransferPage
+
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    pages = {
+        "start": TransferPage(items=(), page_after="1"),
+        "1": TransferPage(items=(), page_after="1"),
+    }
+    client = _scan_client(pages, "start")
+    ref = _grant(conn, incident_id)
+
+    with pytest.raises(ReplaceError):
+        execute(conn, client, ref.id, as_of=SEEN)
+    assert client.created == []

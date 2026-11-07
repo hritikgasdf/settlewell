@@ -68,17 +68,22 @@ def replace_payment(
             conn.rollback()
             raise ReplaceError("approval")
         existing = _by_request_id(conn, request_id)
+        if existing is not None:
+            _require_owner(
+                conn,
+                intent_id=intent_id,
+                approval_id=approval_id,
+                obligation_id=obligation_id,
+                as_of=as_of,
+                amount=format(amount, "f"),
+                currency=currency,
+                beneficiary_id=beneficiary_id,
+                details_hash=details_hash,
+                quote_id=quote_id,
+                request_id=request_id,
+                live=bool(existing["airwallex_id"]),
+            )
         if existing is not None and existing["airwallex_id"]:
-            owner = conn.execute(
-                """
-                SELECT id FROM execution_intent
-                WHERE id = ? AND state = 'executed' AND request_id = ?
-                """,
-                (intent_id, request_id),
-            ).fetchone()
-            if owner is None:
-                conn.rollback()
-                raise ReplaceError("live")
             from backend.execute import remember_remote
 
             remember_remote(conn, intent_id, str(existing["airwallex_id"]), existing["status"] or "sent")
@@ -262,6 +267,54 @@ def _lookup_optional(client, request_id: str):
     return page.items[0]
 
 
+def _require_owner(
+    conn,
+    *,
+    intent_id,
+    approval_id,
+    obligation_id,
+    as_of,
+    amount,
+    currency,
+    beneficiary_id,
+    details_hash,
+    quote_id,
+    request_id,
+    live: bool,
+) -> None:
+    """Read-only. Only the executed intent that owns this request id may recover it."""
+    from backend.execute import ExecuteError, claim
+
+    owner = conn.execute(
+        "SELECT id FROM execution_intent WHERE id = ? AND state = 'executed' AND request_id = ?",
+        (intent_id, request_id),
+    ).fetchone()
+    if owner is None:
+        conn.rollback()
+        raise ReplaceError("live" if live else "approval")
+    try:
+        claimed = claim(
+            conn,
+            intent_id=intent_id,
+            approval_id=approval_id,
+            obligation_id=obligation_id,
+            as_of=as_of,
+            kind="replacement",
+            amount=amount,
+            currency=currency,
+            beneficiary_id=beneficiary_id,
+            details_hash=details_hash,
+            quote_id=quote_id,
+            request_id=request_id,
+        )
+    except ExecuteError as error:
+        conn.rollback()
+        raise ReplaceError(error.code) from error
+    if claimed.fresh:
+        conn.rollback()
+        raise ReplaceError("approval")
+
+
 def _recover_recorded(conn, client, obligation, request_id, intent_id, details_hash, amount: Decimal, currency: str) -> str:
     """Look up the stable request id before any retry. Does not create a transfer."""
     from backend.execute import remember_remote
@@ -337,7 +390,7 @@ def _past_dedupe_margin(conn, obligation_id: int, as_of: str | None) -> bool:
         (obligation_id,),
     ).fetchone()
     if row is None:
-        return False
+        return True
     return _clock(as_of) - _clock(row["seen_at"]) > _DEDUPE_MARGIN
 
 

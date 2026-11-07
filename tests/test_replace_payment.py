@@ -65,11 +65,19 @@ class Api:
         return TransferPage(items=(), page_after=None)
 
 
-def _obligation(conn):
+def _obligation(conn, snapshot: bool = True):
     seed_hero(conn)
     conn.execute(
         "UPDATE transfer_record SET status = 'CANCELLED', request_id = 'original-payment'"
     )
+    if snapshot:
+        conn.execute(
+            """
+            INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+            SELECT id, 'CANCELLED', 'poll', ? FROM transfer_record
+            """,
+            (_SEEN,),
+        )
     conn.commit()
     obligation_id = conn.execute("SELECT id FROM obligation").fetchone()["id"]
     return obligation_id, _grant(conn, obligation_id)
@@ -282,6 +290,43 @@ def test_nothing_is_resent_past_six_days():
     assert api.created == []
 
 
+def test_no_snapshot_means_no_send_and_the_intent_and_grant_stay_unspent():
+    conn = connect()
+    obligation_id, ref = _obligation(conn, snapshot=False)
+    assert conn.execute("SELECT COUNT(*) FROM status_snapshot").fetchone()[0] == 0
+    grant_before = tuple(
+        conn.execute("SELECT * FROM approval WHERE id = ?", (ref.approval_id,)).fetchone()
+    )
+    api = Api()
+    with pytest.raises(ReplaceError) as caught:
+        _pay(conn, api, obligation_id, ref)
+    assert caught.value.code == "too_late"
+    assert api.created == []
+    intent = conn.execute(
+        "SELECT state, request_id FROM execution_intent WHERE id = ?", (ref.id,)
+    ).fetchone()
+    assert intent["state"] == "proposed"
+    assert intent["request_id"] is None
+    grant_after = tuple(
+        conn.execute("SELECT * FROM approval WHERE id = ?", (ref.approval_id,)).fetchone()
+    )
+    assert grant_after == grant_before
+    # The same intent and grant still work once evidence exists.
+    transfer_id = conn.execute(
+        "SELECT id FROM transfer_record WHERE request_id = 'original-payment'"
+    ).fetchone()["id"]
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        VALUES (?, 'CANCELLED', 'poll', ?)
+        """,
+        (transfer_id, _SEEN),
+    )
+    conn.commit()
+    _pay(conn, api, obligation_id, ref)
+    assert api.created == ["stl-inv2291-1"]
+
+
 def test_the_six_day_cutoff_uses_the_clock_and_ignores_a_later_snapshot():
     conn = connect()
     obligation_id, ref = _obligation(conn)
@@ -350,3 +395,66 @@ def test_an_ambiguous_external_duplicate_blocks_replacement():
         _pay(conn, api, obligation_id, ref)
     assert caught.value.code == "ambiguous"
     assert api.created == []
+
+
+_TABLES = ("execution_intent", "transfer_record", "approval", "audit_event", "obligation")
+
+
+def _state(conn):
+    return {
+        table: [tuple(row) for row in conn.execute("SELECT * FROM " + table + " ORDER BY 1")]
+        for table in _TABLES
+    }
+
+
+def _pending(conn):
+    obligation_id, ref = _obligation(conn)
+    api = Api()
+    api.mode = "timeout"
+    api.found = _transfer("awx-existing", "other-id")
+    with pytest.raises(ReplaceError):
+        _pay(conn, api, obligation_id, ref)
+    api.found = _transfer("awx-existing", "stl-inv2291-1")
+    return obligation_id, ref, api
+
+
+def _completed(conn):
+    obligation_id, ref = _obligation(conn)
+    api = Api()
+    _pay(conn, api, obligation_id, ref)
+    return obligation_id, ref, api
+
+
+def _assert_refused_without_writes(conn, api, obligation_id, ref, **kwargs):
+    before = _state(conn)
+    created = list(api.created)
+    with pytest.raises(ReplaceError):
+        _pay(conn, api, obligation_id, ref, **kwargs)
+    assert _state(conn) == before
+    assert api.created == created
+
+
+@pytest.mark.parametrize("make", [_pending, _completed], ids=["pending", "completed"])
+def test_a_different_intent_cannot_recover_an_attempt_it_does_not_own(make):
+    conn = connect()
+    obligation_id, _ref, api = make(conn)
+    other = _grant(conn, obligation_id)
+    _assert_refused_without_writes(conn, api, obligation_id, other)
+
+
+@pytest.mark.parametrize("make", [_pending, _completed], ids=["pending", "completed"])
+def test_the_owner_intent_with_another_grant_cannot_recover(make):
+    conn = connect()
+    obligation_id, ref, api = make(conn)
+    other = _grant(conn, obligation_id)
+    _assert_refused_without_writes(
+        conn, api, obligation_id, ref, approval_id=other.approval_id
+    )
+
+
+@pytest.mark.parametrize("make", [_pending, _completed], ids=["pending", "completed"])
+def test_the_owner_with_its_spent_grant_still_recovers(make):
+    conn = connect()
+    obligation_id, ref, api = make(conn)
+    expected = "awx-existing" if make is _pending else "awx-new"
+    assert _pay(conn, api, obligation_id, ref) == expected

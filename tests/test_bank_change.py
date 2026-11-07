@@ -114,6 +114,12 @@ def _ready(conn):
     conn.execute(
         "UPDATE transfer_record SET request_id = 'original-payment', status = 'CANCELLED'"
     )
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        SELECT id, 'CANCELLED', 'poll', '2026-11-03T12:00:00+00:00' FROM transfer_record
+        """
+    )
     conn.commit()
     return obligation_id, str(incident_id)
 

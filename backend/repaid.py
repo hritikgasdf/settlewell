@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
 
 from backend.ledger import (
     append_audit,
@@ -12,9 +11,8 @@ from backend.ledger import (
     insert_external_transfer,
     set_obligation_status,
 )
+from backend.paid_once import find_matches, scan_paid_once
 from backend.replace_payment import ReplaceError
-
-_LIVE = frozenset({"SCHEDULED", "PROCESSING", "SENT", "PAID", "OVERDUE"})
 
 
 @dataclass(frozen=True)
@@ -23,7 +21,9 @@ class RepaidDecision:
     airwallex_id: str | None = None
 
 
-def colleague_repaid(conn, client, *, obligation_id: int, incident_ref: str) -> RepaidDecision:
+def colleague_repaid(
+    conn, client, *, obligation_id: int, incident_ref: str, matches=None
+) -> RepaidDecision:
     """Close against an untagged repayment, or offer a €0 cancel when it is still scheduled."""
     incident_id = _incident_id(incident_ref)
     incident = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_id,)).fetchone()
@@ -44,18 +44,25 @@ def colleague_repaid(conn, client, *, obligation_id: int, incident_ref: str) -> 
     ).fetchone()
     if original is None or original["status"] != "CANCELLED":
         return RepaidDecision("replace")
-    matches = _matches(conn, client, obligation, original)
+    if matches is None:
+        matches = find_matches(conn, client, obligation_id)
     if not matches:
         return RepaidDecision("replace")
-    scheduled = [item for item in matches if item.status == "SCHEDULED"]
-    covered = [item for item in matches if item.status != "SCHEDULED"]
-    if scheduled and covered:
-        for item in matches:
-            _store(conn, obligation, item)
-        _audit_once(conn, incident_id, "colleague_cancel", scheduled[0].id)
-        conn.commit()
-        return RepaidDecision("cancel", scheduled[0].id)
-    chosen = covered[0] if covered else scheduled[0]
+    # Every match is a supplier-aware look-alike from one complete scan.
+    # Scheduled or ambiguous matches open their own incident. Ours stays open.
+    scheduled = [remote for _kind, remote in matches if remote.status == "SCHEDULED"]
+    if scheduled or any(kind != "duplicate" for kind, _remote in matches):
+        scan_paid_once(conn, client, obligation_id, matches)
+        if scheduled:
+            _audit_once(conn, incident_id, "colleague_cancel", scheduled[0].id)
+            conn.commit()
+            return RepaidDecision("cancel", scheduled[0].id)
+        return RepaidDecision("ambiguous")
+    covered = {remote.id: remote for _kind, remote in matches}
+    if len(covered) != 1:
+        scan_paid_once(conn, client, obligation_id, matches)
+        return RepaidDecision("ambiguous")
+    chosen = next(iter(covered.values()))
     local_id = _store(conn, obligation, chosen)
     attach_live_transfer(conn, obligation_id, local_id)
     if chosen.status == "PAID":
@@ -71,44 +78,6 @@ def _incident_id(incident_ref: str) -> int:
         return int(incident_ref)
     except (TypeError, ValueError):
         raise ReplaceError("incident") from None
-
-
-def _matches(conn, client, obligation, original) -> list:
-    target = Decimal(obligation["amount"])
-    found = []
-    page_token = None
-    for _ in range(5):
-        page = client.list_transfers(page_size=50, page=page_token)
-        for remote in page.items:
-            if not _same_invoice(remote, obligation, target):
-                continue
-            if remote.id == original["airwallex_id"] or remote.request_id == original["request_id"]:
-                continue
-            if remote.status not in _LIVE:
-                continue
-            if _ours(conn, remote.id):
-                continue
-            found.append(remote)
-        if not page.page_after:
-            break
-        page_token = page.page_after
-    return found
-
-
-def _same_invoice(remote, obligation, target: Decimal) -> bool:
-    if remote.reference != obligation["invoice_ref"]:
-        return False
-    if remote.transfer_currency != obligation["currency"]:
-        return False
-    return remote.transfer_amount is not None and remote.transfer_amount == target
-
-
-def _ours(conn, airwallex_id: str) -> bool:
-    row = conn.execute(
-        "SELECT origin FROM transfer_record WHERE airwallex_id = ?",
-        (airwallex_id,),
-    ).fetchone()
-    return row is not None and row["origin"] == "settlewell"
 
 
 def _store(conn, obligation, remote) -> int:
