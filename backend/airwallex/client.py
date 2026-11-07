@@ -281,11 +281,33 @@ class AirwallexClient:
             body["request_id"] = request_id
         payload = self._json("POST", "/api/v1/fx/conversions/create", json_body=body)
         data = payload if isinstance(payload, dict) else {}
-        return Conversion(
-            conversion_id=str(data.get("conversion_id") or data.get("id")),
-            status=_optional_str(data.get("status")),
-            quote_id=_optional_str(data.get("quote_id")),
+        return _conversion_from(data)
+
+    def find_conversion(self, request_id: str) -> Conversion | None:
+        """Look up a conversion created with this request id. None when the list has no row."""
+        payload = self._json(
+            "GET",
+            "/api/v1/fx/conversions",
+            query=[("request_id", request_id), ("page_size", 10)],
         )
+        if isinstance(payload, dict):
+            items = payload.get("items") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+        found: Conversion | None = None
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("request_id") not in (None, request_id):
+                continue
+            if not (item.get("conversion_id") or item.get("id")):
+                continue
+            if found is not None:
+                return None
+            found = _conversion_from(item)
+        return found
 
     def post_json(self, path: str, body: Mapping) -> dict:
         """Authenticated POST. The caller supplies the path; headers stay here."""
@@ -397,6 +419,14 @@ class AirwallexClient:
             message = raw_message if isinstance(raw_message, str) else ""
             field_codes = _field_codes(payload.get("details"))
         return AirwallexError(response.status, code, message, field_codes)
+
+
+def _conversion_from(data: dict) -> Conversion:
+    return Conversion(
+        conversion_id=str(data.get("conversion_id") or data.get("id")),
+        status=_optional_str(data.get("status")),
+        quote_id=_optional_str(data.get("quote_id")),
+    )
 
 
 def _json_default(value):

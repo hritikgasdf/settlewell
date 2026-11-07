@@ -264,7 +264,7 @@ def seed_hero(conn: sqlite3.Connection, *, airwallex_id: str = "synthetic-inv-22
         """,
         (
             airwallex_id,
-            "stl-inv2291-1",
+            "hero-inv2291",
             obligation.lastrowid,
             "onboarding-v1",
             HERO_AMOUNT,

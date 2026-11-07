@@ -242,7 +242,8 @@ def _colleague(invoice: str) -> Transfer:
         transfer_amount=Decimal("100.00"),
         transfer_currency="EUR",
         reference=invoice,
-        beneficiary_id="ben_other",
+        # Same supplier: the supplier's onboarding beneficiary from _books.
+        beneficiary_id="ben_example",
     )
 
 
@@ -323,6 +324,15 @@ def _grant_replacement(conn, incident_id: int):
     from backend.execute import intent_terms, open_intent
 
     obligation_id = _obligation_id(conn, incident_id)
+    # Offline fixture only: the original transfer was observed CANCELLED at the fixture clock.
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        SELECT id, 'CANCELLED', 'poll', ? FROM transfer_record WHERE obligation_id = ?
+        """,
+        (_SEEN, obligation_id),
+    )
+    conn.commit()
     ref = open_intent(
         conn,
         kind="replacement",
@@ -412,6 +422,8 @@ class _Pay:
         self.created: list[str] = []
 
     def get_transfer(self, transfer_id: str) -> Transfer:
+        if self.colleague is not None and transfer_id == self.colleague.id:
+            return self.colleague
         return Transfer(
             id=transfer_id,
             status=self.remote_status,

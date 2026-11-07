@@ -32,7 +32,7 @@ def test_the_replay_walks_the_hero_without_a_client():
     assert replay.approver == "finance-approver"
     assert replay.proposer != replay.approver
     assert replay.created_count == 1
-    assert replay.second_replacement == "refused_sequence"
+    assert replay.second_replacement == "repaid"
     assert replay.paid_once is True
     assert replay.incident_cost == "13.47"
     assert replay.eur_before == "800.00"

@@ -420,3 +420,42 @@ def test_an_fx_intent_for_a_different_currency_does_not_convert():
     assert intent["state"] == "proposed"
     quote = conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_gap'").fetchone()
     assert quote["state"] == "LOCKED"
+
+
+def test_an_interrupted_conversion_is_recovered_by_request_id():
+    conn = connect()
+    terms, _approval_id = _proposed(conn)
+    desk = Desk()
+    found: dict[str, Conversion] = {}
+
+    def create_conversion(**kwargs) -> Conversion:
+        desk.converted.append(kwargs)
+        conversion = Conversion(conversion_id="con_crash", status="SETTLED", quote_id=kwargs["quote_id"])
+        found[kwargs["request_id"]] = conversion
+        raise RuntimeError("crash")
+
+    def find_conversion(request_id: str) -> Conversion | None:
+        return found.get(request_id)
+
+    desk.create_conversion = create_conversion
+    desk.find_conversion = find_conversion
+    intent_id = int(conn.execute("SELECT id FROM execution_intent WHERE quote_id = 'quo_1'").fetchone()["id"])
+
+    with pytest.raises(RuntimeError, match="crash"):
+        execute(conn, desk, intent_id, as_of=EARLY)
+
+    pending = conn.execute(
+        "SELECT state, request_id, remote_id FROM execution_intent WHERE id = ?",
+        (intent_id,),
+    ).fetchone()
+    assert pending["state"] == "executed"
+    assert pending["remote_id"] is None
+    assert pending["request_id"] == desk.converted[0]["request_id"]
+    assert conn.execute("SELECT consumed_by FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["consumed_by"] == ""
+
+    recovered = execute(conn, desk, intent_id, as_of=EARLY)
+
+    assert recovered.remote_id == "con_crash"
+    assert len(desk.converted) == 1
+    assert conn.execute("SELECT consumed_by FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["consumed_by"] == "con_crash"
+    assert terms.quote_id == "quo_1"

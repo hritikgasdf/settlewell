@@ -5,10 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.airwallex.types import BalanceHistoryPage
+from backend.outcomes import reversal_for
+from backend.paid_once import find_matches, scan_paid_once
 from backend.policy import Action, code_from_reason, decide
-from backend.repaid import colleague_repaid
-from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
+from backend.repaid import _unresolved_tracked, colleague_repaid, open_extra, terminal_ids
+from backend.replace_payment import (
+    ReplaceError,
+    replace_payment,
+    replacement_request_id,
+    same_details_target,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,39 @@ def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
     return RefundCard(True, text)
 
 
+def _own_attempt_recorded(conn, intent_id: int | None) -> bool:
+    """Our stored request id is recovered by replace_payment, which validates ownership read-only first.
+    The colleague scan must not see our accepted payment as external."""
+    if intent_id is None:
+        return False
+    row = conn.execute(
+        """
+        SELECT transfer_record.id FROM execution_intent
+        JOIN transfer_record ON transfer_record.request_id = execution_intent.request_id
+        WHERE execution_intent.id = ? AND execution_intent.state = 'executed'
+        """,
+        (intent_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _refuse_on_scan(conn, client, obligation_id: int, incident_ref: str) -> None:
+    """One complete supplier-aware scan. Any match or ambiguity refuses before the payout."""
+    dead = terminal_ids(conn, obligation_id)  # a stored FAILED/CANCELLED outranks a stale live listing
+    matches = [(kind, remote) for kind, remote in find_matches(conn, client, obligation_id) if remote.id not in dead]
+    if not matches and not _unresolved_tracked(conn, int(incident_ref)) and not open_extra(conn, client, obligation_id):
+        return
+    decision = colleague_repaid(
+        conn, client, obligation_id=obligation_id, incident_ref=incident_ref, matches=matches
+    )
+    if decision.action == "replace":
+        if not matches:
+            return  # every tracked payment is now final and not paid
+        # Original not yet cancelled or unlinked: still record the matches, never send.
+        scan_paid_once(conn, client, obligation_id, matches)
+    raise ReplaceError("repaid")
+
+
 def propose_replacement(
     conn,
     client,
@@ -57,9 +96,8 @@ def propose_replacement(
     card = refund_card(conn, client, obligation_id=obligation_id)
     if not card.unlocked:
         raise ReplaceError("refund")
-    decision = colleague_repaid(conn, client, obligation_id=obligation_id, incident_ref=incident_ref)
-    if decision.action != "replace":
-        raise ReplaceError("repaid")
+    if not _own_attempt_recorded(conn, intent_id):
+        _refuse_on_scan(conn, client, obligation_id, incident_ref)
     original = conn.execute(
         "SELECT * FROM transfer_record WHERE id = ?",
         (obligation["live_transfer_id"],),
@@ -69,22 +107,27 @@ def propose_replacement(
     remote = client.get_transfer(original["airwallex_id"])
     if remote.transfer_amount is None or not remote.transfer_currency:
         raise ReplaceError("record")
-    version = conn.execute(
-        """
-        SELECT beneficiary_id, details_hash FROM bank_detail_version
-        WHERE supplier_id = ? AND source = 'verified_callback' AND beneficiary_id IS NOT NULL
-        ORDER BY id DESC LIMIT 1
-        """,
-        (obligation["supplier_id"],),
-    ).fetchone()
-    if version is None:
-        raise ReplaceError("unverified")
     decision = decide(
         remote.status,
         failure_code=code_from_reason(remote.failure_reason),
         claim="where",
     )
-    if decision.action not in {Action.REPLACE_SAME, Action.REPLACE_NEW_DETAILS}:
+    if decision.action is Action.REPLACE_SAME:
+        beneficiary_id, details_hash = same_details_target(conn, obligation, remote)
+    elif decision.action is Action.REPLACE_NEW_DETAILS:
+        version = conn.execute(
+            """
+            SELECT beneficiary_id, details_hash FROM bank_detail_version
+            WHERE supplier_id = ? AND source = 'verified_callback' AND beneficiary_id IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (obligation["supplier_id"],),
+        ).fetchone()
+        if version is None:
+            raise ReplaceError("unverified")
+        beneficiary_id = version["beneficiary_id"]
+        details_hash = version["details_hash"]
+    else:
         raise ReplaceError("policy")
     if intent_id is None or as_of is None:
         raise ReplaceError("approval")
@@ -97,9 +140,9 @@ def propose_replacement(
         conn,
         client,
         obligation_id=obligation_id,
-        attempt=_next_attempt(conn, obligation["invoice_ref"]),
-        beneficiary_id=version["beneficiary_id"],
-        details_hash=version["details_hash"],
+        attempt=_attempt_for(conn, obligation["invoice_ref"], int(intent["id"])),
+        beneficiary_id=beneficiary_id,
+        details_hash=details_hash,
         transfer_method=remote.transfer_method or "SWIFT",
         reason="other_services",
         transfer_amount=Decimal(remote.transfer_amount),
@@ -109,6 +152,27 @@ def propose_replacement(
         approval_id=int(intent["approval_id"]),
         quote_id=intent["quote_id"],
     )
+
+
+def _attempt_for(conn, invoice_ref: str, intent_id: int) -> int:
+    """Resume the request id stored before the call. Do not mint the next attempt.
+
+    The stored id is read again under the write lock. A copy read earlier can be stale:
+    a concurrent worker for this same intent may have recorded attempt 1 since."""
+    prefix = replacement_request_id(invoice_ref, 1).rsplit("-", 1)[0] + "-"
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT request_id FROM execution_intent WHERE id = ?", (intent_id,)
+        ).fetchone()
+        recorded = row["request_id"] if row is not None else None
+        if recorded and recorded.startswith(prefix):
+            suffix = recorded[len(prefix) :]
+            if suffix.isdigit():
+                return int(suffix)
+        return _next_attempt(conn, invoice_ref)
+    finally:
+        conn.rollback()
 
 
 def _next_attempt(conn, invoice_ref: str) -> int:
@@ -125,23 +189,7 @@ def _next_attempt(conn, invoice_ref: str) -> int:
     return max(numbers, default=0) + 1
 
 
-def _reversal_for(client, transfer_id: str, currency: str | None):
-    if not currency:
-        return None
-    page_token = None
-    for _ in range(5):
-        history: BalanceHistoryPage = client.balance_history(
-            currency=currency,
-            page_size=10,
-            page=page_token,
-        )
-        for item in history.items:
-            if item.transaction_type == "PAYOUT_REVERSAL" and item.source == transfer_id:
-                return item
-        if not history.has_more or not history.page_after:
-            return None
-        page_token = history.page_after
-    return None
+_reversal_for = reversal_for
 
 
 _SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}
