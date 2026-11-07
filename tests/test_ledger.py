@@ -36,7 +36,7 @@ def test_seed_creates_lumen_invoice_and_its_transfer():
     assert bundle["transfers"][0]["reference"] == HERO_INVOICE
     assert bundle["transfers"][0]["origin"] == "settlewell"
     assert bundle["transfers"][0]["status"] == "SENT"
-    assert bundle["transfers"][0]["request_id"] == "stl-inv2291-1"
+    assert bundle["transfers"][0]["request_id"] == "hero-inv2291"
     assert bundle["obligation"]["live_transfer_id"] == bundle["transfers"][0]["id"]
     assert bundle["versions"][0]["bank_name"] == "Commerzbank"
     assert bundle["versions"][0]["source"] == "onboarding"

@@ -286,7 +286,7 @@ class HeroBook:
             transfer_currency="EUR",
             fee_amount=Decimal("0.00"),
             reference="INV-2291",
-            beneficiary_id="ben_colleague",
+            beneficiary_id="ben_commerzbank",
             transfer_method="SWIFT",
         )
 
@@ -569,13 +569,35 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         intent_id=replace_intent.id,
         as_of=SEEN,
     )
+    second_intent = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action=failure.action.value,
+        amount=format(recorded.transfer_amount, "f"),
+        currency=recorded.transfer_currency or "EUR",
+        beneficiary_id=created_bank.remote_id,
+        details_hash=card.details_hash,
+        proposer=AP_CLERK,
+        failure_code="90701",
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(
+        conn,
+        second_intent.approval_id,
+        intent_terms(conn, second_intent.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
     try:
         propose_replacement(
             conn,
             book,
             obligation_id=obligation_id,
             incident_ref=str(incident_id),
-            intent_id=replace_intent.id,
+            intent_id=second_intent.id,
             as_of=SEEN,
         )
     except ReplaceError as error:

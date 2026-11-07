@@ -64,7 +64,7 @@ class Desk:
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=Decimal("13.47"),
-            failure_reason="90802: Beneficiary bank returned",
+            failure_reason="90701: Account closed",
             reference="INV-2291",
         )
 
@@ -262,13 +262,13 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
         kind="replacement",
         incident_id=int(incident_ref),
         obligation_id=obligation_id,
-        action="REPLACE_SAME",
+        action="REPLACE_NEW_DETAILS",
         amount="4200.00",
         currency="EUR",
         beneficiary_id="ben_dkb",
         details_hash=version["details_hash"],
         proposer=AP_CLERK,
-        failure_code="90802",
+        failure_code="90701",
         expires_at="2026-11-04T12:00:00+00:00",
         created_at="2026-11-03T12:00:00+00:00",
     )

@@ -8,7 +8,12 @@ from decimal import Decimal
 from backend.airwallex.types import BalanceHistoryPage
 from backend.policy import Action, code_from_reason, decide
 from backend.repaid import colleague_repaid
-from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
+from backend.replace_payment import (
+    ReplaceError,
+    replace_payment,
+    replacement_request_id,
+    same_details_target,
+)
 
 
 @dataclass(frozen=True)
@@ -69,22 +74,27 @@ def propose_replacement(
     remote = client.get_transfer(original["airwallex_id"])
     if remote.transfer_amount is None or not remote.transfer_currency:
         raise ReplaceError("record")
-    version = conn.execute(
-        """
-        SELECT beneficiary_id, details_hash FROM bank_detail_version
-        WHERE supplier_id = ? AND source = 'verified_callback' AND beneficiary_id IS NOT NULL
-        ORDER BY id DESC LIMIT 1
-        """,
-        (obligation["supplier_id"],),
-    ).fetchone()
-    if version is None:
-        raise ReplaceError("unverified")
     decision = decide(
         remote.status,
         failure_code=code_from_reason(remote.failure_reason),
         claim="where",
     )
-    if decision.action not in {Action.REPLACE_SAME, Action.REPLACE_NEW_DETAILS}:
+    if decision.action is Action.REPLACE_SAME:
+        beneficiary_id, details_hash = same_details_target(conn, obligation, remote)
+    elif decision.action is Action.REPLACE_NEW_DETAILS:
+        version = conn.execute(
+            """
+            SELECT beneficiary_id, details_hash FROM bank_detail_version
+            WHERE supplier_id = ? AND source = 'verified_callback' AND beneficiary_id IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (obligation["supplier_id"],),
+        ).fetchone()
+        if version is None:
+            raise ReplaceError("unverified")
+        beneficiary_id = version["beneficiary_id"]
+        details_hash = version["details_hash"]
+    else:
         raise ReplaceError("policy")
     if intent_id is None or as_of is None:
         raise ReplaceError("approval")
@@ -97,9 +107,9 @@ def propose_replacement(
         conn,
         client,
         obligation_id=obligation_id,
-        attempt=_next_attempt(conn, obligation["invoice_ref"]),
-        beneficiary_id=version["beneficiary_id"],
-        details_hash=version["details_hash"],
+        attempt=_attempt_for(conn, obligation["invoice_ref"], intent["request_id"]),
+        beneficiary_id=beneficiary_id,
+        details_hash=details_hash,
         transfer_method=remote.transfer_method or "SWIFT",
         reason="other_services",
         transfer_amount=Decimal(remote.transfer_amount),
@@ -109,6 +119,16 @@ def propose_replacement(
         approval_id=int(intent["approval_id"]),
         quote_id=intent["quote_id"],
     )
+
+
+def _attempt_for(conn, invoice_ref: str, recorded: str | None) -> int:
+    """Resume the request id stored before the call. Do not mint the next attempt."""
+    prefix = replacement_request_id(invoice_ref, 1).rsplit("-", 1)[0] + "-"
+    if recorded and recorded.startswith(prefix):
+        suffix = recorded[len(prefix) :]
+        if suffix.isdigit():
+            return int(suffix)
+    return _next_attempt(conn, invoice_ref)
 
 
 def _next_attempt(conn, invoice_ref: str) -> int:

@@ -25,6 +25,7 @@ class Record:
             transfer_method="SWIFT",
             fee_amount=Decimal("13.47"),
             failure_reason="90802: Beneficiary bank returned",
+            beneficiary_id="ben_onboarding",
             reference="INV-2291",
         )
 
@@ -83,6 +84,9 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
     conn.execute(
         "UPDATE transfer_record SET request_id = 'original-payment', status = 'CANCELLED'"
     )
+    conn.execute(
+        "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
+    )
     supplier_id = conn.execute(
         "SELECT supplier_id FROM obligation WHERE id = ?",
         (obligation_id,),
@@ -106,8 +110,8 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
         action="REPLACE_SAME",
         amount="4200.50",
         currency="EUR",
-        beneficiary_id="ben_verified",
-        details_hash="callback-v2",
+        beneficiary_id="ben_onboarding",
+        details_hash="onboarding-v1",
         proposer=AP_CLERK,
         failure_code="90802",
         expires_at="2026-11-04T12:00:00+00:00",
@@ -133,7 +137,7 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
     sent = client.created[0]
     assert sent["transfer_amount"] == Decimal("4200.50")
     assert sent["transfer_currency"] == "EUR"
-    assert sent["beneficiary_id"] == "ben_verified"
+    assert sent["beneficiary_id"] == "ben_onboarding"
     local = conn.execute("SELECT amount FROM obligation").fetchone()["amount"]
     assert local == "4200.00"
     assert sent["transfer_amount"] != Decimal(local)

@@ -383,6 +383,145 @@ def _intent_id(conn) -> int:
     return int(conn.execute("SELECT id FROM execution_intent ORDER BY id DESC LIMIT 1").fetchone()["id"])
 
 
+def test_same_details_replacement_uses_the_onboarding_beneficiary():
+    conn = connect()
+    incident_id = seed_hero(conn, airwallex_id="awx-hero")
+    obligation_id = conn.execute(
+        "SELECT obligation_id FROM incident WHERE id = ?",
+        (incident_id,),
+    ).fetchone()["obligation_id"]
+    conn.execute(
+        """
+        UPDATE transfer_record
+        SET status = 'CANCELLED', failure_code = '90802'
+        WHERE airwallex_id = 'awx-hero'
+        """
+    )
+    conn.execute(
+        "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
+    )
+    conn.commit()
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_onboarding",
+        details_hash="onboarding-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(conn, ref.approval_id, intent_terms(conn, ref.id), approver=FINANCE_APPROVER, used_at=SEEN)
+    client = Pay(reason="90802: Beneficiary bank returned")
+    client.get_transfer = _with_beneficiary(client.get_transfer, "ben_onboarding")
+
+    result = execute(conn, client, ref.id, as_of=SEEN)
+
+    assert result.remote_id == "awx-new"
+    assert client.created[0]["beneficiary_id"] == "ben_onboarding"
+    assert conn.execute(
+        "SELECT id FROM bank_detail_version WHERE source = 'verified_callback'"
+    ).fetchone() is None
+
+
+def test_a_crash_mid_payout_is_recovered_by_request_id():
+    conn = connect()
+    incident_id = seed_hero(conn, airwallex_id="awx-hero")
+    obligation_id = conn.execute(
+        "SELECT obligation_id FROM incident WHERE id = ?",
+        (incident_id,),
+    ).fetchone()["obligation_id"]
+    conn.execute(
+        "UPDATE transfer_record SET status = 'CANCELLED', failure_code = '90802' WHERE airwallex_id = 'awx-hero'"
+    )
+    conn.execute(
+        "UPDATE bank_detail_version SET beneficiary_id = 'ben_onboarding' WHERE source = 'onboarding'"
+    )
+    conn.commit()
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_onboarding",
+        details_hash="onboarding-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(conn, ref.approval_id, intent_terms(conn, ref.id), approver=FINANCE_APPROVER, used_at=SEEN)
+    client = Pay(reason="90802: Beneficiary bank returned")
+    client.get_transfer = _with_beneficiary(client.get_transfer, "ben_onboarding")
+    client.accepted = None
+
+    def create_transfer(**kwargs):
+        from backend.airwallex.types import Transfer
+
+        client.created.append(kwargs)
+        client.accepted = Transfer(
+            id="awx-crash",
+            status="SCHEDULED",
+            request_id=kwargs["request_id"],
+            transfer_amount=kwargs["transfer_amount"],
+            transfer_currency=kwargs["transfer_currency"],
+            reference="INV-2291",
+        )
+        raise RuntimeError("crash")
+
+    def list_transfers(**kwargs):
+        from backend.airwallex.types import TransferPage
+
+        if client.accepted is not None and kwargs.get("request_id") == client.accepted.request_id:
+            return TransferPage(items=(client.accepted,), page_after=None)
+        return TransferPage(items=(), page_after=None)
+
+    client.create_transfer = create_transfer
+    client.list_transfers = list_transfers
+
+    with pytest.raises(RuntimeError, match="crash"):
+        execute(conn, client, ref.id, as_of=SEEN)
+
+    pending = conn.execute(
+        "SELECT airwallex_id, request_id, status FROM transfer_record WHERE request_id = 'stl-inv2291-1'"
+    ).fetchone()
+    assert pending["airwallex_id"] is None
+    assert pending["status"] == "IN_FLIGHT"
+    stored = conn.execute("SELECT request_id, remote_id FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()
+    assert stored["request_id"] == "stl-inv2291-1"
+    assert stored["remote_id"] is None
+
+    recovered = execute(conn, client, ref.id, as_of=SEEN)
+
+    assert recovered.remote_id == "awx-crash"
+    assert len(client.created) == 1
+    attached = conn.execute(
+        "SELECT airwallex_id FROM transfer_record WHERE request_id = 'stl-inv2291-1'"
+    ).fetchone()
+    assert attached["airwallex_id"] == "awx-crash"
+
+
+def _with_beneficiary(getter, beneficiary_id: str):
+    def get_transfer(transfer_id: str):
+        remote = getter(transfer_id)
+        return type(remote)(
+            **{
+                **remote.__dict__,
+                "beneficiary_id": beneficiary_id,
+            }
+        )
+
+    return get_transfer
+
+
 def test_a_finite_expiry_still_pays_before_it_lapses():
     conn = connect()
     _obligation_id, incident_id = _ready(conn)

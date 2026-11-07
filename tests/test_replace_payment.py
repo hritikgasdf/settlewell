@@ -57,8 +57,11 @@ class Api:
         return _transfer("awx-new", request_id)
 
     def list_transfers(self, **kwargs):
-        if kwargs.get("request_id") == self.found.request_id:
+        if self.mode in {"timeout", "duplicate"} and kwargs.get("request_id") == self.found.request_id:
             return TransferPage(items=(self.found,), page_after=None)
+        accepted = getattr(self, "accepted", None)
+        if accepted is not None and kwargs.get("request_id") == accepted.request_id:
+            return TransferPage(items=(accepted,), page_after=None)
         return TransferPage(items=(), page_after=None)
 
 
@@ -169,12 +172,15 @@ def test_concurrent_replace_makes_one_transfer(tmp_path):
     api = Api()
     barrier = threading.Barrier(2)
     found: list[str] = []
+    errors: list[str] = []
 
     def worker() -> None:
         conn = connect(path)
         try:
             barrier.wait()
             found.append(_pay(conn, api, obligation_id, ref))
+        except ReplaceError as error:
+            errors.append(error.code)
         finally:
             conn.close()
 
@@ -185,7 +191,8 @@ def test_concurrent_replace_makes_one_transfer(tmp_path):
         thread.join()
 
     assert api.created == ["stl-inv2291-1"]
-    assert found == ["awx-new", "awx-new"]
+    assert set(found) == {"awx-new"}
+    assert errors == [] or errors == ["in_flight"]
     check = connect(path)
     rows = check.execute(
         "SELECT airwallex_id FROM transfer_record WHERE request_id = 'stl-inv2291-1'"
@@ -272,4 +279,74 @@ def test_nothing_is_resent_past_six_days():
             reason="goods",
         )
     assert caught.value.code == "too_late"
+    assert api.created == []
+
+
+def test_the_six_day_cutoff_uses_the_clock_and_ignores_a_later_snapshot():
+    conn = connect()
+    obligation_id, ref = _obligation(conn)
+    transfer_id = conn.execute(
+        "SELECT id FROM transfer_record WHERE request_id = 'original-payment'"
+    ).fetchone()["id"]
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        VALUES (?, 'CANCELLED', 'poll', '2020-01-01T00:00:00+00:00')
+        """,
+        (transfer_id,),
+    )
+    conn.commit()
+    api = Api()
+    with pytest.raises(ReplaceError) as caught:
+        replace_payment(
+            conn,
+            api,
+            obligation_id=obligation_id,
+            attempt=1,
+            intent_id=ref.id,
+            approval_id=ref.approval_id,
+            beneficiary_id="ben_1",
+            details_hash="onboarding-v1",
+            transfer_method="SWIFT",
+            reason="goods",
+        )
+    assert caught.value.code == "too_late"
+    assert api.created == []
+    conn.execute(
+        """
+        INSERT INTO status_snapshot (transfer_record_id, status, source, seen_at)
+        VALUES (?, 'CANCELLED', 'poll', '2026-11-07T00:00:00+00:00')
+        """,
+        (transfer_id,),
+    )
+    conn.commit()
+    with pytest.raises(ReplaceError) as later:
+        replace_payment(
+            conn,
+            api,
+            obligation_id=obligation_id,
+            attempt=1,
+            as_of="2026-11-08T00:00:00+00:00",
+            intent_id=ref.id,
+            approval_id=ref.approval_id,
+            beneficiary_id="ben_1",
+            details_hash="onboarding-v1",
+            transfer_method="SWIFT",
+            reason="goods",
+        )
+    assert later.value.code == "too_late"
+
+
+def test_an_ambiguous_external_duplicate_blocks_replacement():
+    conn = connect()
+    obligation_id, ref = _obligation(conn)
+    conn.execute(
+        "INSERT INTO incident (obligation_id, claim_json, state) VALUES (?, 'ambiguous:awx-x', 'AMBIGUOUS')",
+        (obligation_id,),
+    )
+    conn.commit()
+    api = Api()
+    with pytest.raises(ReplaceError) as caught:
+        _pay(conn, api, obligation_id, ref)
+    assert caught.value.code == "ambiguous"
     assert api.created == []

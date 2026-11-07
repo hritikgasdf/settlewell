@@ -63,7 +63,7 @@ A second claim on quote `c4bd4ef1-afaf-3314-9269-0937af396e19` was rejected. The
 
 ### What a transfer-only agent does not do
 
-**Cancel a colleague's still-scheduled duplicate at €0.** The scan is account-wide: another live transfer with the same invoice, amount, and currency. While that transfer is `SCHEDULED`, the action is `STOP_DUPLICATE` (`R-STOP-DUPLICATE-SCHEDULED`). The clerk proposes and the finance approver approves. Cancel does not post a ledger fee. On the 2026-11-04 sandbox run the duplicate `78e1501e-0b9b-4544-984a-5111da33e5cb` ended CANCELLED, and the EUR balance history had no movement for it.
+**Cancel a colleague's still-scheduled duplicate at €0.** The scan reads every transfer page. A second live payment counts when the invoice matches and the beneficiary is one of that supplier's bank-detail versions. The same invoice paid to another beneficiary is ambiguous, not a confirmed duplicate. While that transfer is `SCHEDULED`, the action is `STOP_DUPLICATE` (`R-STOP-DUPLICATE-SCHEDULED`). The clerk proposes and the finance approver approves. Cancel does not post a ledger fee. On the 2026-11-04 sandbox run the duplicate `78e1501e-0b9b-4544-984a-5111da33e5cb` ended CANCELLED, and the EUR balance history had no movement for it.
 
 **A status-gated proof PDF.** `issue_proof` asks for a `NO_FEE_DISPLAY` confirmation letter only while the live status is SENT or PAID. The rule while SENT is `R-PROOF-SENT`. After cancel, the same request is refused and the reply says the transfer is cancelled. The mock page's ETA and cut-off are labels, not Airwallex API fields. The live run attached proof while SENT and refused it after cancel.
 

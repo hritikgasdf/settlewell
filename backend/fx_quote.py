@@ -102,6 +102,12 @@ def execute_fx_quote(
         raise FxQuoteError("void")
     if intent["remote_id"]:
         return FxDecision("converted", str(terms.quote_id), approval_id, intent["remote_id"])
+    request_id = intent["request_id"] or conversion_request_id(str(terms.quote_id))
+    if intent["state"] == "executed":
+        found = _lookup_conversion(client, request_id)
+        if found is None or not found.conversion_id:
+            raise FxQuoteError("in_flight")
+        return _finish_conversion(conn, intent, str(terms.quote_id), approval_id, found)
     quote = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
     if quote is None:
         raise FxQuoteError("quote")
@@ -129,6 +135,7 @@ def execute_fx_quote(
             beneficiary_id=terms.beneficiary_id,
             details_hash=terms.details_hash,
             quote_id=quote_id,
+            request_id=request_id,
         )
     except ExecuteError as error:
         raise FxQuoteError(error.code) from error
@@ -144,8 +151,13 @@ def execute_fx_quote(
             buy_currency=buy,
             sell_currency=sell,
             buy_amount=Decimal(terms.amount),
-            request_id=conversion_request_id(quote_id),
+            request_id=request_id,
         )
+    except TimeoutError:
+        found = _lookup_conversion(client, request_id)
+        if found is None or not found.conversion_id:
+            raise FxQuoteError("unknown") from None
+        return _finish_conversion(conn, intent, quote_id, approval_id, found)
     except AirwallexError as error:
         if error.code in _AIRWALLEX_EXPIRY:
             release_unsent_fx_quote(conn, quote_id)
@@ -248,6 +260,45 @@ def _requote(
         created_at=as_of,
     )
     return FxDecision("reapprove", quote.quote_id, opened.approval_id)
+
+
+def _lookup_conversion(client, request_id: str):
+    finder = getattr(client, "find_conversion", None)
+    if finder is None:
+        return None
+    try:
+        return finder(request_id)
+    except (AirwallexError, TimeoutError):
+        raise FxQuoteError("unknown") from None
+
+
+def _finish_conversion(conn, intent, quote_id: str, approval_id: int, conversion) -> FxDecision:
+    """Attach a conversion found by request id. Does not create another one."""
+    from backend.execute import remember_remote
+
+    quote = conn.execute(
+        "SELECT state, consumed_by FROM fx_quote WHERE quote_id = ?",
+        (quote_id,),
+    ).fetchone()
+    if quote is None:
+        raise FxQuoteError("quote")
+    conversion_id = str(conversion.conversion_id)
+    if quote["state"] == "LOCKED":
+        try:
+            consume_fx_quote(conn, quote_id, conversion_id)
+        except LedgerError:
+            raise FxQuoteError("consumed") from None
+    elif quote["state"] == "CONSUMED" and quote["consumed_by"] in ("", conversion_id):
+        if quote["consumed_by"] == "":
+            try:
+                record_fx_conversion(conn, quote_id, conversion_id)
+            except LedgerError:
+                raise FxQuoteError("consumed") from None
+    else:
+        raise FxQuoteError("consumed")
+    remember_remote(conn, int(intent["id"]), conversion_id, conversion.status or "converted")
+    conn.commit()
+    return FxDecision("converted", quote_id, approval_id, conversion_id)
 
 
 def _terms_are_intent(terms: ApprovalTerms, intent) -> bool:
