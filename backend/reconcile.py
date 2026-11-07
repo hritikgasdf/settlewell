@@ -15,11 +15,21 @@ from backend.ledger import (
     set_obligation_status,
     set_transfer_status,
 )
-from backend.outcomes import NOT_PAID_STATUSES, Outcome, decide_set, outcome_kind, reversal_for
+from backend.outcomes import (
+    NOT_PAID_STATUSES,
+    HistoryError,
+    Outcome,
+    decide_set,
+    full_refund,
+    outcome_kind,
+    refund_currency,
+    refund_principal,
+    reversals_for,
+)
 from backend.paid_once import find_matches
 from backend.replace_payment import ReplaceError, _lookup_optional, _require_owner, _store
 
-_LOOKUP_ERRORS = (AirwallexError, TimeoutError, OSError, ReplaceError)
+_LOOKUP_ERRORS = (HistoryError, AirwallexError, TimeoutError, OSError, ReplaceError)
 
 
 def poll_incident(conn, client, incident_id: int, *, seen_at: str) -> list[dict]:
@@ -62,7 +72,7 @@ def poll_incident(conn, client, incident_id: int, *, seen_at: str) -> list[dict]
         _tag_external(conn, obligation, remote, incident_id, seen_at)
         outcomes.append(Outcome(remote.id, "replacement", remote.status, credited=kind == "duplicate"))
     if unresolved:
-        set_obligation_status(conn, obligation["id"], "IN_FLIGHT")
+        _set_status(conn, obligation["id"], "IN_FLIGHT")
     _decide(conn, incident_id, obligation, original_id, outcomes, incomplete, bool(unresolved), seen_at)
     conn.commit()
     return timeline(conn, incident_id)
@@ -188,7 +198,7 @@ def _recover_attempts(conn, client, incident_id: int, obligation, seen_at: str) 
         if not _recover_one(conn, client, incident_id, obligation, row, seen_at):
             clear = False
             _audit_once(conn, incident_id, "attempt_unresolved", row["request_id"], seen_at)
-            set_obligation_status(conn, obligation["id"], "IN_FLIGHT")
+            _set_status(conn, obligation["id"], "IN_FLIGHT")
         conn.commit()
     return clear
 
@@ -255,6 +265,13 @@ def _recover_one(conn, client, incident_id: int, obligation, row, seen_at: str) 
         return _mismatch(conn, incident_id, request_id, error.code, seen_at)
     _store(conn, obligation, remote, request_id=request_id, details_hash=details_hash, amount=amount, currency=currency)
     remember_remote(conn, intent["id"], str(remote.id), remote.status)
+    conn.commit()  # the accepted id is durable before the funding hooks run
+    from backend.funding import record_recovered
+
+    try:
+        record_recovered(conn, client, int(intent["id"]), remote, seen_at)
+    except ReplaceError:
+        return _mismatch(conn, incident_id, request_id, "funding", seen_at)
     return True
 
 
@@ -267,17 +284,32 @@ def _read_outcome(conn, client, incident_id, obligation, row, versions, is_origi
     """Refresh one known payment by id. Returns (Outcome, readable). Unreadable falls back to stored facts."""
     transfer_id = row["airwallex_id"]
     stored = row["status"]
-    remote = reversal = None
+    remote = reversals = refund = None
     readable = True
     try:
         remote = client.get_transfer(transfer_id)
-        reversal = reversal_for(client, transfer_id, remote.transfer_currency or row["currency"])
+        reversals = reversals_for(client, transfer_id, refund_currency(remote, row["currency"]))
+        refund = full_refund(remote, reversals)
     except _LOOKUP_ERRORS:
         readable = False
         _audit_once(conn, incident_id, "outcome_lookup_failed", transfer_id, seen_at)
-    if reversal is not None:
+    for reversal in reversals or ():
         _note_reversal(conn, incident_id, reversal, seen_at)
-    seen, amount = _remembered_reversal(conn, incident_id, transfer_id)
+    principal = refund_principal(remote) if remote is not None else None
+    if refund is not None:
+        detail = _refund_detail(transfer_id, principal)
+        if _refund_state(conn, incident_id, transfer_id, detail) != "refund_verified":
+            append_audit(conn, incident_id=incident_id, kind="refund_verified", detail=detail, created_at=seen_at)
+        refunded = True
+    elif reversals:
+        refunded = False  # fresh data contradicts: partial, wrong currency, pending or ambiguous
+        if principal is not None:
+            detail = _refund_detail(transfer_id, principal)
+            if _refund_state(conn, incident_id, transfer_id, detail) == "refund_verified":
+                append_audit(conn, incident_id=incident_id, kind="refund_withdrawn", detail=detail, created_at=seen_at)
+    else:  # no fresh evidence (transport failure or not in history): keep only a bound earlier verification
+        refunded = _refund_remembered(conn, incident_id, transfer_id, remote, principal)
+    seen, _amount = _remembered_reversal(conn, incident_id, transfer_id)
     status = stored
     if remote is not None:
         if stored in NOT_PAID_STATUSES and remote.status not in NOT_PAID_STATUSES:
@@ -311,11 +343,39 @@ def _read_outcome(conn, client, incident_id, obligation, row, versions, is_origi
         "original" if is_original else "replacement",
         status,
         reversed=seen,
-        returned=is_original and status == "CANCELLED" and amount is not None and amount != 0,
+        returned=is_original and status == "CANCELLED" and refunded,
         credited=credited,
         fresh=remote is not None,
     )
     return outcome, readable
+
+
+def _refund_detail(transfer_id: str, principal) -> str:
+    amount, currency = principal
+    return f"source={transfer_id} amount={format(amount.normalize(), 'f')} currency={currency}"
+
+
+def _refund_state(conn, incident_id: int, transfer_id: str, detail: str | None = None) -> str | None:
+    """The LATEST refund transition (by row id, never by as_of) for this transfer: verified or withdrawn."""
+    if detail is None:
+        where, arg = "detail LIKE ?", f"source={transfer_id} amount=%"
+    else:
+        where, arg = "detail = ?", detail
+    row = conn.execute(
+        "SELECT kind FROM audit_event WHERE incident_id = ? AND kind IN ('refund_verified', 'refund_withdrawn') "
+        f"AND {where} ORDER BY id DESC LIMIT 1",
+        (incident_id, arg),
+    ).fetchone()
+    return row["kind"] if row else None
+
+
+def _refund_remembered(conn, incident_id: int, transfer_id: str, remote, principal) -> bool:
+    """An earlier full-refund verification, still bound to this principal and not withdrawn since."""
+    if remote is not None:
+        if principal is None:
+            return False
+        return _refund_state(conn, incident_id, transfer_id, _refund_detail(transfer_id, principal)) == "refund_verified"
+    return _refund_state(conn, incident_id, transfer_id) == "refund_verified"
 
 
 def _remembered_reversal(conn, incident_id: int, transfer_id: str) -> tuple[bool, Decimal | None]:
@@ -357,6 +417,24 @@ def _tag_external(conn, obligation, remote, incident_id: int, seen_at: str) -> N
     _audit_once(conn, incident_id, "external_lookalike", f"external airwallex_id={remote.id}", seen_at)
 
 
+def _fee_escalated(conn, obligation_id: int) -> bool:
+    """A payout for this obligation was charged over its fee budget: a person must review, no automatic clear."""
+    for row in conn.execute(
+        "SELECT fee_budget, fee_currency, actual_fee, actual_fee_currency FROM payout_funding "
+        "WHERE obligation_id = ? AND actual_fee IS NOT NULL",
+        (obligation_id,),
+    ):
+        if row["actual_fee_currency"] != row["fee_currency"] or Decimal(row["actual_fee"]) > Decimal(row["fee_budget"]):
+            return True
+    return False
+
+
+def _set_status(conn, obligation_id: int, status: str) -> None:
+    if status != "ESCALATED" and _fee_escalated(conn, obligation_id):
+        status = "ESCALATED"
+    set_obligation_status(conn, obligation_id, status)
+
+
 def _decide(conn, incident_id, obligation, original_id, outcomes, incomplete, pending, seen_at) -> None:
     """Close or reopen ONCE from the complete set. Audits are idempotent; state moves are transitions."""
     current = conn.execute("SELECT status, live_transfer_id FROM obligation WHERE id = ?", (obligation["id"],)).fetchone()
@@ -369,7 +447,12 @@ def _decide(conn, incident_id, obligation, original_id, outcomes, incomplete, pe
             _audit_once(conn, incident_id, "original_disposition", f"{item.airwallex_id}:{label}", seen_at)
         else:
             _audit_once(conn, incident_id, "replacement_disposition", f"{item.airwallex_id}:{item.status}", seen_at)
+    escalated = _fee_escalated(conn, obligation["id"])
+    if escalated:
+        set_obligation_status(conn, obligation["id"], "ESCALATED")
     if verdict == "close":
+        if escalated:
+            return  # fee over budget: never closed automatically; outcome audits above are still recorded
         set_obligation_status(conn, obligation["id"], "PAID_ONCE")
         if state == "OPEN":
             conn.execute("UPDATE incident SET state = 'CLOSED' WHERE id = ?", (incident_id,))
@@ -379,7 +462,7 @@ def _decide(conn, incident_id, obligation, original_id, outcomes, incomplete, pe
         _audit_once(conn, incident_id, "outcome_conflict", ",".join(sorted(i.airwallex_id for i in outcomes)), seen_at)
     if verdict in ("reopen", "conflict"):
         if current["status"] == "PAID_ONCE":
-            set_obligation_status(conn, obligation["id"], "IN_FLIGHT")
+            _set_status(conn, obligation["id"], "IN_FLIGHT")
         if state == "CLOSED":
             conn.execute("UPDATE incident SET state = 'OPEN' WHERE id = ?", (incident_id,))
             _audit_once(conn, incident_id, "incident_reopened", f"{incident_id}:{_serial(conn, incident_id)}", seen_at)

@@ -35,7 +35,7 @@ def reserve_floor() -> Decimal:
             "floor",
             "SETTLEWELL_RESERVE_FLOOR must be a positive number",
         ) from None
-    if floor <= 0:
+    if not floor.is_finite() or floor <= 0:
         raise FundingError(
             "floor",
             "SETTLEWELL_RESERVE_FLOOR must be a positive number",
@@ -58,18 +58,47 @@ class FundingResult:
 
 
 def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> FundingResult:
-    """Cover the EUR payment plus the floor. A top-up above the limit is not sent."""
+    """Plan EUR cover from the LIVE original transfer: amount + fee estimate + floor.
+
+    Planning only: no conversion, no payout. The fee is the conservative fallback
+    budget (`conservative_upper_bound_estimate`), not a bank quote. Anything missing or unknown raises FundingError.
+    A top-up above the limit is not sent."""
+    from backend.funding import _READ_ERRORS, _decimal, _fee_estimate
+
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
     if obligation is None:
         raise FundingError("missing")
     if obligation["currency"] != "EUR":
         raise FundingError("currency")
-    balances = client.current_balances()
+    record = None
+    if obligation["live_transfer_id"] is not None:
+        record = conn.execute(
+            "SELECT airwallex_id FROM transfer_record WHERE id = ?", (obligation["live_transfer_id"],)
+        ).fetchone()
+    if record is None or not record["airwallex_id"]:
+        raise FundingError("original")
+    try:
+        remote = client.get_transfer(record["airwallex_id"])
+    except _READ_ERRORS:
+        raise FundingError("original", "original transfer unreadable") from None
+    original = _decimal(remote.transfer_amount)
+    if original is None or original <= 0:
+        raise FundingError("original", "original amount unknown")
+    if remote.transfer_currency != "EUR":
+        raise FundingError("currency")
+    estimate = _fee_estimate(remote, "EUR")
+    if estimate is None:
+        raise FundingError("fee", "original fee unknown")
+    floor = reserve_floor()
+    try:
+        balances = client.current_balances()
+    except _READ_ERRORS:
+        raise FundingError("balance", "balance unreadable") from None
     eur = _available(balances, "EUR")
     usd = _available(balances, "USD")
     _snapshot(conn, "EUR", eur, as_of, "before")
     _snapshot(conn, "USD", usd, as_of, "before")
-    needed = Decimal(obligation["amount"]) + reserve_floor()
+    needed = original + estimate[0] + floor
     if eur >= needed:
         conn.commit()
         return FundingResult("ready")
@@ -99,10 +128,13 @@ def fund_replacement(conn, client, *, obligation_id: int, as_of: str) -> Funding
 
 
 def _available(balances, currency: str) -> Decimal:
-    for row in balances:
-        if row.currency == currency:
-            return row.available_amount
-    return Decimal(0)
+    """The one available amount. A missing, duplicate, or malformed row is unknown, never zero."""
+    from backend.funding import cash_available
+
+    try:
+        return cash_available(balances, currency)
+    except (ValueError, AttributeError, TypeError):
+        raise FundingError("balance", f"{currency} cash available unknown") from None
 
 
 def _snapshot(conn, currency: str, available: Decimal, taken_at: str, label: str) -> None:

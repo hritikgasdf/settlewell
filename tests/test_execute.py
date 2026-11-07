@@ -25,9 +25,16 @@ EXPIRES = "2026-11-03T13:00:00+00:00"
 
 
 class Pay:
-    def __init__(self, *, reason: str = "90701: Account closed", amount: str = "4200.00") -> None:
+    def __init__(
+        self,
+        *,
+        reason: str = "90701: Account closed",
+        amount: str = "4200.00",
+        eur_available: str = "100000.00",
+    ) -> None:
         self.reason = reason
         self.amount = amount
+        self.eur_available = eur_available
         self.created: list[dict] = []
         self.conversions: list[dict] = []
         self.beneficiaries: list[dict] = []
@@ -43,6 +50,7 @@ class Pay:
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=Decimal("13.47"),
+            fee_currency="EUR",
             failure_reason=self.reason,
             reference="INV-2291",
         )
@@ -55,7 +63,7 @@ class Pay:
                 BalanceHistoryItem(
                     id="rev",
                     source="awx-hero",
-                    amount=Decimal("4200.00"),
+                    amount=Decimal(self.amount),
                     currency="EUR",
                     balance=None,
                     description=None,
@@ -63,7 +71,7 @@ class Pay:
                     posted_at=None,
                     source_type="PAYOUT",
                     transaction_type="PAYOUT_REVERSAL",
-                    account_type=None,
+                    account_type="CASH",
                     reference="INV-2291",
                 ),
             ),
@@ -86,6 +94,8 @@ class Pay:
             request_id=kwargs["request_id"],
             transfer_amount=kwargs["transfer_amount"],
             transfer_currency=kwargs["transfer_currency"],
+            fee_amount=Decimal("13.47"),
+            fee_currency="EUR",
             reference="INV-2291",
         )
 
@@ -125,9 +135,9 @@ class Pay:
 
         def row(currency: str, amount: str) -> Balance:
             value = Decimal(amount)
-            return Balance(currency, value, Decimal(0), Decimal(0), value, Decimal(0))
+            return Balance(currency, value, Decimal(0), Decimal(0), value, Decimal(0), account_type="cash")
 
-        return [row("EUR", "0.00"), row("USD", "100000.00")]
+        return [row("EUR", self.eur_available), row("USD", "100000.00")]
 
 
 def _ready(conn, *, reason: str = "90701: Account closed"):
@@ -294,7 +304,7 @@ def test_an_expired_grant_does_not_pay():
 def test_fx_conversion_waits_for_approval_of_the_locked_quote():
     conn = connect()
     _obligation_id, incident_id = _ready(conn)
-    client = Pay()
+    client = Pay(eur_available="0.00")
     locked = fund_replacement(conn, client, obligation_id=_obligation_id, as_of=SEEN)
     assert locked.action == "locked"
     assert client.conversions == []
@@ -493,6 +503,7 @@ def test_a_crash_mid_payout_is_recovered_by_request_id():
             request_id=kwargs["request_id"],
             transfer_amount=kwargs["transfer_amount"],
             transfer_currency=kwargs["transfer_currency"],
+            beneficiary_id=kwargs["beneficiary_id"],
             reference="INV-2291",
         )
         raise RuntimeError("crash")
@@ -576,6 +587,7 @@ def test_restart_recovers_our_accepted_payout_before_the_colleague_scan(tmp_path
                 request_id=kwargs["request_id"],
                 transfer_amount=kwargs["transfer_amount"],
                 transfer_currency=kwargs["transfer_currency"],
+                beneficiary_id=kwargs["beneficiary_id"],
                 reference="INV-2291",
             )
         )
@@ -728,8 +740,8 @@ def test_replaying_one_of_two_identical_intents_pays_once():
     conn = connect()
     obligation_id, incident_id = _ready(conn)
     client = Pay()
-    first = _grant(conn, incident_id, quote_id="quo_same")
-    second = _grant(conn, incident_id, quote_id="quo_same")
+    first = _grant(conn, incident_id)  # no FX top-up: a quote id would need a SETTLED conversion
+    second = _grant(conn, incident_id)
 
     paid = execute(conn, client, first.id, as_of=SEEN)
     again = execute(conn, client, first.id, as_of=SEEN)
@@ -750,7 +762,6 @@ def test_replaying_one_of_two_identical_intents_pays_once():
             as_of=SEEN,
             intent_id=second.id,
             approval_id=second.approval_id,
-            quote_id="quo_same",
         )
     assert caught.value.code == "live"
     assert len(client.created) == 1
@@ -782,22 +793,24 @@ def test_a_different_quote_does_not_spend_the_replacement_grant():
 
     assert caught.value.code == "void"
     assert client.created == []
-    paid = replace_payment(
-        conn,
-        client,
-        obligation_id=obligation_id,
-        attempt=1,
-        beneficiary_id="ben_verified",
-        details_hash="callback-v2",
-        transfer_method="SWIFT",
-        reason="other_services",
-        as_of=SEEN,
-        intent_id=ref.id,
-        approval_id=ref.approval_id,
-        quote_id="quo_locked",
-    )
-    assert paid == "awx-new"
-    assert len(client.created) == 1
+    # The right quote now reaches the funding gate, which refuses: no SETTLED conversion exists.
+    with pytest.raises(ReplaceError) as refused:
+        replace_payment(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            attempt=1,
+            beneficiary_id="ben_verified",
+            details_hash="callback-v2",
+            transfer_method="SWIFT",
+            reason="other_services",
+            as_of=SEEN,
+            intent_id=ref.id,
+            approval_id=ref.approval_id,
+            quote_id="quo_locked",
+        )
+    assert refused.value.code == "conversion"
+    assert client.created == []
 
 
 def test_a_changed_amount_at_execution_does_not_pay():

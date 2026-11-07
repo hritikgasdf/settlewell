@@ -96,7 +96,15 @@ def replace_payment(
                 conn, client, obligation, request_id, intent_id, details_hash, amount, currency
             )
         _refuse_unless_replaceable(conn, client, obligation)
+        from backend import funding
         from backend.execute import ExecuteError, claim, remember_remote
+
+        def gate() -> None:
+            funding.gate(
+                conn, client, obligation=obligation, intent_id=intent_id, request_id=request_id,
+                amount=amount, currency=currency, as_of=as_of,
+                beneficiary_id=beneficiary_id, transfer_method=transfer_method,
+            )
 
         try:
             claimed = claim(
@@ -112,6 +120,7 @@ def replace_payment(
                 details_hash=details_hash,
                 quote_id=quote_id,
                 request_id=request_id,
+                before_persist=gate,
             )
         except ExecuteError as error:
             conn.rollback()
@@ -163,6 +172,7 @@ def replace_payment(
             currency=currency,
         )
         remember_remote(conn, intent_id, str(remote.id), remote.status)
+        funding.record_acceptance(conn, request_id, remote, as_of)
         conn.commit()
     except ReplaceError as error:
         if error.code == "unknown":
@@ -176,6 +186,10 @@ def replace_payment(
     except AirwallexError as error:
         if error.code in _DEFINITIVE_REFUSAL:
             _mark(conn, obligation, request_id, details_hash, status="REFUSED", failure_code=error.code)
+            if recorded:
+                from backend import funding
+
+                funding.release_refused(conn, request_id, as_of)
             conn.commit()
             raise ReplaceError("refused") from error
         if recorded:
@@ -191,6 +205,7 @@ def replace_payment(
         else:
             conn.rollback()
         raise
+    funding.observe_after(conn, client, request_id, as_of)
     if remote.status in {"FAILED", "CANCELLED"}:
         set_obligation_status(conn, obligation_id, "IN_FLIGHT")
         conn.commit()
@@ -245,14 +260,20 @@ def _create_or_find(
     except AirwallexError as error:
         if error.code != "duplicate_request_id":
             raise
-        return _lookup(client, request_id)
     except TimeoutError:
-        return _lookup(client, request_id)
+        pass
+    # Only the exact attempt's transfer may be bound; anything else stays unknown.
+    from backend import funding
 
-
-def _lookup(client, request_id: str):
     found = _lookup_optional(client, request_id)
-    if found is None:
+    if found is None or not funding.terms_match(
+        found,
+        request_id=request_id,
+        invoice_ref=obligation["invoice_ref"],
+        amount=amount,
+        currency=currency,
+        beneficiary_id=beneficiary_id,
+    ):
         raise ReplaceError("unknown")
     return found
 
@@ -262,7 +283,7 @@ def _lookup_optional(client, request_id: str):
         page = client.list_transfers(request_id=request_id)
     except (AirwallexError, TimeoutError):
         raise ReplaceError("unknown") from None
-    if len(page.items) != 1:
+    if len(page.items) != 1 or page.page_after:
         return None
     return page.items[0]
 
@@ -324,6 +345,21 @@ def _recover_recorded(conn, client, obligation, request_id, intent_id, details_h
         set_obligation_status(conn, obligation["id"], "IN_FLIGHT")
         conn.commit()
         raise ReplaceError("in_flight")
+    from backend import funding
+
+    intent = conn.execute("SELECT beneficiary_id FROM execution_intent WHERE id = ?", (intent_id,)).fetchone()
+    if intent is None or not funding.terms_match(
+        remote,
+        request_id=request_id,
+        invoice_ref=obligation["invoice_ref"],
+        amount=amount,
+        currency=currency,
+        beneficiary_id=intent["beneficiary_id"],
+    ):
+        # Wrong or foreign transfer: bind nothing, write nothing for it, never resend.
+        set_obligation_status(conn, obligation["id"], "IN_FLIGHT")
+        conn.commit()
+        raise ReplaceError("in_flight")
     _store(
         conn,
         obligation,
@@ -334,6 +370,9 @@ def _recover_recorded(conn, client, obligation, request_id, intent_id, details_h
         currency=currency,
     )
     remember_remote(conn, intent_id, str(remote.id), remote.status)
+    from backend.funding import record_acceptance
+
+    record_acceptance(conn, request_id, remote, datetime.now(UTC).isoformat())
     conn.commit()
     return str(remote.id)
 

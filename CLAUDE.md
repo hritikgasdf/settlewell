@@ -28,6 +28,7 @@
 - `backend/eval_harness.py` — Run the first 15 incidents offline. No Airwallex calls and no secrets.
 - `backend/eval_rest.py` — Incidents 16–30. Each one calls production code. No Airwallex and no secrets.
 - `backend/execute.py` — Intent, approval, then one remote action. P0-2 and P0-3 call this module.
+- `backend/funding.py` — Mandatory cash/refund gate, durable payout holds, before/after observations and ownership-safe recovery.
 - `backend/fx_funding.py` — Buy EUR with USD when a replacement would leave less than the reserve floor.
 - `backend/fx_quote.py` — One use per quote. Expiry is checked before approval and again before conversion.
 - `backend/ledger.py` — SQLite ledger. Versions, snapshots, and the audit log are append-only.

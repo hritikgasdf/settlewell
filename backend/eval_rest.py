@@ -142,7 +142,7 @@ def _fx_floor(_case: dict) -> tuple[str, str, bool, bool]:
     over_conn.commit()
     over = fund_replacement(
         over_conn,
-        _Balances(eur="0.00", usd="100000.00"),
+        _Balances(eur="0.00", usd="100000.00", original="20000.00"),
         obligation_id=_obligation_id(over_conn, over_incident),
         as_of=_SEEN,
     )
@@ -483,10 +483,24 @@ class _Letters:
 
 
 class _Balances:
-    def __init__(self, *, eur: str, usd: str) -> None:
+    def __init__(self, *, eur: str, usd: str, original: str = "4200.00") -> None:
         self.eur = Decimal(eur)
         self.usd = Decimal(usd)
+        self.original = Decimal(original)
         self.converted = 0
+
+    def get_transfer(self, transfer_id: str):
+        from backend.airwallex.types import Transfer
+
+        return Transfer(
+            id=transfer_id,
+            status="CANCELLED",
+            transfer_amount=self.original,
+            transfer_currency="EUR",
+            transfer_method="SWIFT",
+            fee_amount=Decimal("13.47"),
+            fee_currency="EUR",
+        )
 
     def current_balances(self):
         return (_balance("EUR", self.eur), _balance("USD", self.usd))
@@ -555,6 +569,7 @@ def _balance(currency: str, amount: Decimal) -> Balance:
         reserved_amount=Decimal(0),
         total_amount=amount,
         prepayment_amount=Decimal(0),
+        account_type="cash",
     )
 
 

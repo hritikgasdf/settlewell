@@ -67,6 +67,7 @@ class ExecuteResult:
     kind: str
     remote_id: str
     status: str
+    funding_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -181,7 +182,7 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
             intent_id=int(intent["id"]),
             as_of=as_of,
         )
-        return ExecuteResult("replacement", remote_id, "sent")
+        return ExecuteResult("replacement", remote_id, "sent", _funding_note(conn, int(intent["id"])))
     if intent["kind"] == "fx_conversion":
         from backend.fx_quote import FxQuoteError, execute_fx_quote
 
@@ -233,8 +234,11 @@ def claim(
     quote_id: str | None = None,
     target_id: str | None = None,
     request_id: str | None = None,
+    before_persist=None,
 ) -> Claimed:
-    """Take this intent, or recover it. Never selects another row with the same terms."""
+    """Take this intent, or recover it. Never selects another row with the same terms.
+
+    before_persist runs after every exact-intent check and before the claim is stored."""
     intent = _intent(conn, intent_id)
     if int(intent["approval_id"] or 0) != int(approval_id):
         raise ExecuteError("approval")
@@ -258,6 +262,8 @@ def claim(
     _ready(conn, intent, as_of)
     if kind == "replacement" and not _code_may_pay(intent["failure_code"]):
         raise ExecuteError("policy")
+    if before_persist is not None:
+        before_persist()
     cursor = conn.execute(
         """
         UPDATE execution_intent
@@ -308,7 +314,23 @@ def remember_remote(conn, intent_id: int, remote_id: str, status: str) -> None:
     )
 
 
+def _funding_note(conn, intent_id: int) -> str | None:
+    from backend.funding import note_for_intent
+
+    return note_for_intent(conn, intent_id)
+
+
 def _resume(conn, client, intent, as_of: str) -> ExecuteResult:
+    if intent["remote_id"] and intent["kind"] == "replacement":
+        from backend.funding import backfill_after
+
+        backfill_after(conn, client, int(intent["id"]), as_of)
+        return ExecuteResult(
+            "replacement",
+            str(intent["remote_id"]),
+            intent["remote_status"] or "recovered",
+            _funding_note(conn, int(intent["id"])),
+        )
     if intent["remote_id"]:
         return ExecuteResult(
             intent["kind"],
@@ -341,7 +363,10 @@ def _resume(conn, client, intent, as_of: str) -> ExecuteResult:
             intent_id=int(intent["id"]),
             as_of=as_of,
         )
-        return ExecuteResult("replacement", remote_id, "sent")
+        from backend.funding import backfill_after
+
+        backfill_after(conn, client, int(intent["id"]), as_of)
+        return ExecuteResult("replacement", remote_id, "sent", _funding_note(conn, int(intent["id"])))
     if intent["kind"] == "fx_conversion":
         from backend.fx_quote import FxQuoteError, execute_fx_quote
 

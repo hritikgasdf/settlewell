@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.airwallex.types import Balance, Conversion, FxQuote
+from backend.airwallex.types import Balance, Conversion, FxQuote, Transfer
 from backend.fx_funding import (
     FX_LIMIT,
     RESERVE_FLOOR,
@@ -16,6 +16,8 @@ from backend.fx_funding import (
 from backend.ledger import connect, seed_hero
 
 AS_OF = "2026-11-03T12:00:00+00:00"
+FEE = Decimal("13.47")  # the original transfer's own fee
+BUDGET = Decimal("26.94")  # conservative budget: 2 x 13.47, above the 25.00 minimum
 
 
 def _balance(currency: str, available: str) -> Balance:
@@ -27,16 +29,26 @@ def _balance(currency: str, available: str) -> Balance:
         reserved_amount=Decimal(0),
         total_amount=amount,
         prepayment_amount=Decimal(0),
+        account_type="cash",
     )
 
 
 class Book:
-    def __init__(self, eur: str, usd: str) -> None:
+    def __init__(self, eur: str, usd: str, original: str = "4200.00") -> None:
+        self.original = original
         self.eur = Decimal(eur)
         self.usd = Decimal(usd)
         self.quotes: list[dict] = []
         self.conversions: list[dict] = []
         self.sell = Decimal(0)
+
+    def get_transfer(self, transfer_id: str) -> Transfer:
+        """The live original: its amount and own fee drive the plan, not the local obligation."""
+        return Transfer(
+            id=transfer_id, status="CANCELLED", request_id="original-payment",
+            transfer_amount=Decimal(self.original), transfer_currency="EUR",
+            fee_amount=FEE, fee_currency="EUR", reference="INV-2291",
+        )
 
     def current_balances(self) -> list[Balance]:
         return [_balance("EUR", str(self.eur)), _balance("USD", str(self.usd))]
@@ -74,7 +86,7 @@ def _obligation(conn, *, amount: str | None = None) -> int:
 def test_eur_at_the_floor_does_not_convert():
     conn = connect()
     obligation_id = _obligation(conn)
-    needed = Decimal("4200.00") + RESERVE_FLOOR
+    needed = Decimal("4200.00") + BUDGET + RESERVE_FLOOR
     book = Book(str(needed), "100000.00")
 
     result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
@@ -90,7 +102,7 @@ def test_eur_under_the_floor_converts_usd_within_the_limit():
     conn = connect()
     obligation_id = _obligation(conn)
     book = Book("800.00", "100000.00")
-    shortfall = Decimal("4200.00") + RESERVE_FLOOR - Decimal("800.00")
+    shortfall = Decimal("4200.00") + BUDGET + RESERVE_FLOOR - Decimal("800.00")
     assert shortfall <= FX_LIMIT
 
     result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
@@ -124,8 +136,8 @@ def test_eur_under_the_floor_converts_usd_within_the_limit():
 def test_a_top_up_over_the_limit_escalates_without_a_conversion():
     conn = connect()
     obligation_id = _obligation(conn, amount="15000.00")
-    book = Book("800.00", "100000.00")
-    shortfall = Decimal("15000.00") + RESERVE_FLOOR - Decimal("800.00")
+    book = Book("800.00", "100000.00", original="15000.00")
+    shortfall = Decimal("15000.00") + BUDGET + RESERVE_FLOOR - Decimal("800.00")
     assert shortfall > FX_LIMIT
 
     result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
@@ -175,7 +187,7 @@ def test_a_demo_floor_above_the_balance_converts_once_under_the_limit(monkeypatc
     obligation_id = _obligation(conn)
     book = Book("10000.00", "100000.00")
     monkeypatch.setenv("SETTLEWELL_RESERVE_FLOOR", "15000.00")
-    shortfall = Decimal("4200.00") + Decimal("15000.00") - Decimal("10000.00")
+    shortfall = Decimal("4200.00") + BUDGET + Decimal("15000.00") - Decimal("10000.00")
     assert shortfall <= FX_LIMIT
 
     result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
