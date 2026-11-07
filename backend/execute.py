@@ -167,6 +167,8 @@ def open_intent(
 def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
     """Run one approved intent. A second call returns the remote result it already stored."""
     intent = _intent(conn, intent_id)
+    if intent["state"] == "refused":
+        raise ExecuteError("refused")
     if intent["state"] == "executed":
         return _resume(conn, client, intent, as_of)
     _ready(conn, intent, as_of)
@@ -217,6 +219,78 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
             raise ExecuteError("status_" + stopped.status)
         return ExecuteResult("cancel", str(intent["target_id"]), stopped.status)
     raise ExecuteError("kind")
+
+
+def approve_intent(conn, intent_id: int, *, approver: str, as_of: str) -> None:
+    """Consume the single-use approval for exactly this proposed intent. Sends nothing.
+
+    Terms come from the stored intent. The caller supplies no amount or beneficiary."""
+    from backend.approvals import ApprovalError, approve
+
+    intent = _intent(conn, intent_id)
+    if intent["state"] == "refused":
+        raise ExecuteError("refused")
+    if intent["state"] != "proposed" or intent["approval_id"] is None:
+        raise ExecuteError("used")
+    if approver not in DEMO_IDENTITIES:
+        raise ExecuteError("approver")
+    if _moment(as_of) >= _expiry(intent["expires_at"]):
+        raise ExecuteError("expired")
+    try:
+        approve(
+            conn,
+            int(intent["approval_id"]),
+            _terms(conn, intent_id),
+            approver=approver,
+            used_at=_moment(as_of),
+        )
+    except ApprovalError as error:
+        raise ExecuteError(error.code) from error
+
+
+def reject_intent(conn, intent_id: int, *, rejector: str, reason: str, as_of: str) -> None:
+    """Refuse a proposed intent for good. The approval can never be consumed afterwards."""
+    intent = _intent(conn, intent_id)
+    if intent["state"] != "proposed":
+        raise ExecuteError("refused" if intent["state"] == "refused" else "used")
+    if rejector not in DEMO_IDENTITIES:
+        raise ExecuteError("approver")
+    approval = conn.execute(
+        "SELECT used_at FROM approval WHERE id = ?", (intent["approval_id"],)
+    ).fetchone()
+    if approval is None or approval["used_at"] is not None:
+        raise ExecuteError("used")
+    _refuse(conn, intent, "intent_rejected", f"by={rejector} reason={reason}", as_of)
+
+
+def fail_closed(conn, intent_id: int, *, code: str, as_of: str) -> bool:
+    """After a refusal that happened before any claim, make the intent terminal."""
+    intent = _intent(conn, intent_id)
+    if intent["state"] != "proposed":
+        return False
+    _refuse(conn, intent, "intent_failed_closed", f"code={code}", as_of)
+    return True
+
+
+def _refuse(conn, intent, kind: str, detail: str, as_of: str) -> None:
+    from backend.ledger import append_audit
+
+    conn.execute(
+        "UPDATE execution_intent SET state = 'refused' WHERE id = ? AND state = 'proposed'",
+        (intent["id"],),
+    )
+    conn.execute(
+        "UPDATE approval SET binding_hash = ? WHERE id = ? AND used_at IS NULL",
+        ("void:" + str(intent["id"]), intent["approval_id"]),
+    )
+    append_audit(
+        conn,
+        incident_id=intent["incident_id"],
+        kind=kind,
+        detail=f"intent={intent['id']} {detail}",
+        created_at=_moment(as_of),
+    )
+    conn.commit()
 
 
 def claim(

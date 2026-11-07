@@ -20,6 +20,7 @@
 - `backend/airwallex/client.py` — Airwallex sandbox adapter.
 - `backend/airwallex/http.py` — HTTP types for the Airwallex adapter. No credentials are logged.
 - `backend/airwallex/types.py` — Typed Airwallex results. Money is Decimal so fees such as 13.47 stay exact.
+- `backend/api.py` — Local-demo FastAPI (MOCK only). Writes call execute(); loopback, Origin and CSRF guarded. Start: `uv run python -m backend.api`.
 - `backend/approvals.py` — Bound, single-use approvals. A changed detail voids the grant.
 - `backend/bank_change.py` — New supplier details become a new beneficiary only after validate and a call-back.
 - `backend/claims.py` — Strict claim parser. A model may only propose JSON. Code accepts it or escalates.
