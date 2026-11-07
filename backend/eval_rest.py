@@ -22,6 +22,7 @@ from backend.eval_harness import (
     _books,
     _obligation_id,
     _Pay,
+    _pinned_supplier,
     _policy,
     run_first_15,
 )
@@ -66,21 +67,23 @@ def _holds(case: dict, action: str, proof_allowed: bool, money_out: bool) -> boo
 
 def _bad_json(case: dict) -> tuple[str, str, bool, bool]:
     conn, _incident_id = _books("INV-1016", status="SENT")
-    parsed = parse_email("status?", lambda _text: "{not-json", conn)
+    parsed = parse_email("status?", lambda _text: "{not-json", conn, supplier_id=_pinned_supplier(conn))
     decide(case["status"], claim="where")
     return _escalation(parsed, len(_Pay().created))
 
 
 def _amount_mismatch(case: dict) -> tuple[str, str, bool, bool]:
     conn, _incident_id = _books("INV-1017", status="SENT")
-    parsed = parse_email("where is it?", lambda _text: _claim("INV-1017", amount="1.00"), conn)
+    parsed = parse_email("where is it?", lambda _text: _claim("INV-1017", amount="1.00"), conn, supplier_id=_pinned_supplier(conn)
+    )
     decide(case["status"], claim="where")
     return _escalation(parsed, 0)
 
 
 def _currency_mismatch(case: dict) -> tuple[str, str, bool, bool]:
     conn, _incident_id = _books("INV-1019", status="PAID")
-    parsed = parse_email("paid in dollars", lambda _text: _claim("INV-1019", currency="USD"), conn)
+    parsed = parse_email("paid in dollars", lambda _text: _claim("INV-1019", currency="USD"), conn, supplier_id=_pinned_supplier(conn)
+    )
     decide(case["status"], claim="where")
     return _escalation(parsed, 0)
 
@@ -247,7 +250,7 @@ def _smuggle(case: dict) -> tuple[str, str, bool, bool]:
         new_amount="9999.00",
     )
     client = _Pay(airwallex_id="awx-eval-27", remote_status="SENT", reversal=False)
-    parsed = parse_email(email, lambda _text: smuggled, conn)
+    parsed = parse_email(email, lambda _text: smuggled, conn, supplier_id=_pinned_supplier(conn))
     decision = decide(case["status"], claim="where")
     if not parsed.escalated:
         try:
@@ -265,7 +268,8 @@ def _smuggle(case: dict) -> tuple[str, str, bool, bool]:
 
 def _no_match(case: dict) -> tuple[str, str, bool, bool]:
     conn, _incident_id = _books("INV-1028", status="SENT")
-    parsed = parse_email("unknown", lambda _text: _claim("INV-MISSING"), conn)
+    parsed = parse_email("unknown", lambda _text: _claim("INV-MISSING"), conn, supplier_id=_pinned_supplier(conn)
+    )
     decide(case["status"], claim="where")
     return _escalation(parsed, 0)
 
