@@ -3,6 +3,8 @@
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import (
     BalanceHistoryItem,
@@ -10,7 +12,8 @@ from backend.airwallex.types import (
     ConfirmationLetter,
     parse_transfer,
 )
-from backend.sandbox import SandboxDriver, run_contract_cli
+from backend.sandbox import SandboxContractError, SandboxDriver, _live_contract, run_contract_cli
+from backend.scripts.sandbox_contract import run_closed_return
 
 
 class ScriptedApi:
@@ -68,7 +71,8 @@ class ScriptedApi:
 
 def test_account_closed_contract_reads_reason_letter_and_reversal():
     api = ScriptedApi()
-    result = SandboxDriver(api).prove_account_closed_return(
+    result = run_closed_return(
+        api,
         transfer_amount=Decimal(20),
         transfer_currency="USD",
         source_currency="USD",
@@ -111,6 +115,24 @@ def test_simulation_path_lives_only_in_the_driver():
     driver = (package / "sandbox.py").read_text()
     assert "simulation" not in adapter.lower()
     assert "/api/v1/simulation/transfers/" in driver
+
+
+def test_contract_creates_refuse_outside_the_script():
+    api = ScriptedApi()
+    with pytest.raises(SandboxContractError):
+        SandboxDriver(api).prove_account_closed_return(
+            transfer_amount=Decimal(20),
+            transfer_currency="USD",
+            source_currency="USD",
+            beneficiary_id="ben_1",
+            transfer_method="LOCAL",
+            reference="SW-CONTRACT",
+            reason="other_services",
+            request_id="stl-contract-1",
+        )
+    assert api.calls == []
+    with pytest.raises(SandboxContractError):
+        _live_contract()
 
 
 def test_contract_cli_does_not_call_the_network_by_default(monkeypatch, capsys):

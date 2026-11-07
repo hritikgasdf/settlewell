@@ -6,8 +6,16 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from backend.approvals import AP_CLERK, ApprovalTerms, binding_hash, propose
+from backend.execute import (
+    CallbackConfirmation,
+    ExecuteError,
+    callback_ok,
+    normalize_timestamp,
+    open_intent,
+)
 from backend.ledger import append_audit, append_bank_detail_version
 
 _IBAN_CODE = "083"
@@ -38,8 +46,10 @@ def verify_bank_change(
     beneficiary: Mapping,
     attested_by: str | None = None,
     attested_at: str | None = None,
+    confirmation: CallbackConfirmation | None = None,
+    proposer: str = AP_CLERK,
 ) -> BankChangeCard:
-    """Validate the details, require a call-back, then create a new beneficiary."""
+    """Validate the details and require a structured call-back. Creation waits for execute."""
     incident_id = _incident_id(incident_ref)
     incident = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_id,)).fetchone()
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
@@ -50,7 +60,7 @@ def verify_bank_change(
         (obligation["supplier_id"],),
     ).fetchone()
     body = _without_id(beneficiary)
-    digest = _details_hash(bank_name, account_last4, body)
+    digest = beneficiary_details_hash(bank_name, account_last4, body)
     current = _verified(conn, obligation["supplier_id"], digest)
     if current is None:
         _remember_claim(conn, obligation["supplier_id"], digest, bank_name, account_last4)
@@ -61,29 +71,45 @@ def verify_bank_change(
                 raise BankChangeError("083")
             raise BankChangeError("invalid")
         phone = supplier["phone_on_file"] if supplier is not None else None
-        if not _attested(attested_by, attested_at, phone):
-            raise BankChangeError("callback")
-        created = client.create_beneficiary(body)
-        version_id = append_bank_detail_version(
+        try:
+            callback_ok(confirmation, phone_on_file=phone, proposer=proposer)
+        except ExecuteError as error:
+            raise BankChangeError(error.code) from error
+        text = _diff(conn, obligation["supplier_id"], 0, bank_name, account_last4)
+        opened = datetime.fromisoformat(normalize_timestamp(confirmation.attested_at))
+        intent = open_intent(
             conn,
-            supplier_id=obligation["supplier_id"],
-            beneficiary_id=created.id,
+            kind="beneficiary",
+            incident_id=incident_id,
+            obligation_id=obligation_id,
+            action="NEW_BENEFICIARY",
+            amount=obligation["amount"],
+            currency=obligation["currency"],
+            beneficiary_id="",
             details_hash=digest,
-            bank_name=bank_name,
-            account_last4=account_last4,
-            source="verified_callback",
-            verified_by=attested_by,
-            verified_at=attested_at,
+            proposer=proposer,
+            body_json=json.dumps(
+                {
+                    "body": body,
+                    "bank_name": bank_name,
+                    "account_last4": account_last4,
+                    "phone": confirmation.phone,
+                    "confirmed": confirmation.confirmed,
+                    "attested_by": confirmation.attested_by,
+                    "attested_at": confirmation.attested_at,
+                }
+            ),
+            expires_at=(opened + timedelta(hours=24)).isoformat(),
+            created_at=confirmation.attested_at,
         )
-        text = _diff(conn, obligation["supplier_id"], version_id, bank_name, account_last4)
         append_audit(
             conn,
             incident_id=incident_id,
             kind="bank_change",
             detail=text,
-            created_at=str(attested_at),
+            created_at=confirmation.attested_at,
         )
-        beneficiary_id = created.id
+        return BankChangeCard(text, digest, "", intent.approval_id)
     else:
         text = _diff(conn, obligation["supplier_id"], current["id"], bank_name, account_last4)
         beneficiary_id = current["beneficiary_id"]
@@ -108,7 +134,7 @@ def _without_id(beneficiary: Mapping) -> dict:
     return {key: value for key, value in beneficiary.items() if key != "id"}
 
 
-def _details_hash(bank_name: str, account_last4: str, body: Mapping) -> str:
+def beneficiary_details_hash(bank_name: str, account_last4: str, body: Mapping) -> str:
     payload = {"account_last4": account_last4, "bank_name": bank_name, "beneficiary": body}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()

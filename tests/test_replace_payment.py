@@ -7,8 +7,12 @@ import pytest
 
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import Transfer, TransferPage
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
+from backend.execute import intent_terms, open_intent
 from backend.ledger import connect, seed_hero
 from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
+
+_SEEN = "2026-11-03T12:00:00+00:00"
 
 
 def _transfer(transfer_id: str, request_id: str) -> Transfer:
@@ -28,6 +32,17 @@ class Api:
         self.mode = "ok"
         self.found = _transfer("awx-existing", "stl-inv2291-1")
         self.last: dict = {}
+        self.failure_reason = "90802: Beneficiary bank returned"
+
+    def get_transfer(self, transfer_id: str) -> Transfer:
+        return Transfer(
+            id=transfer_id,
+            status="CANCELLED",
+            transfer_amount=Decimal("4200.00"),
+            transfer_currency="EUR",
+            failure_reason=self.failure_reason,
+            reference="INV-2291",
+        )
 
     def create_transfer(self, **kwargs):
         request_id = kwargs["request_id"]
@@ -53,15 +68,53 @@ def _obligation(conn):
         "UPDATE transfer_record SET status = 'CANCELLED', request_id = 'original-payment'"
     )
     conn.commit()
-    return conn.execute("SELECT id FROM obligation").fetchone()["id"]
+    obligation_id = conn.execute("SELECT id FROM obligation").fetchone()["id"]
+    return obligation_id, _grant(conn, obligation_id)
 
 
-_ARGS = {
-    "beneficiary_id": "ben_1",
-    "details_hash": "onboarding-v1",
-    "transfer_method": "SWIFT",
-    "reason": "goods",
-}
+def _grant(conn, obligation_id: int):
+    incident_id = conn.execute(
+        "SELECT id FROM incident WHERE obligation_id = ?",
+        (obligation_id,),
+    ).fetchone()["id"]
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_1",
+        details_hash="onboarding-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at="2026-11-04T12:00:00+00:00",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
+    return ref
+
+
+def _pay(conn, api, obligation_id, ref, attempt: int = 1, **extra):
+    values = {
+        "beneficiary_id": "ben_1",
+        "details_hash": "onboarding-v1",
+        "transfer_method": "SWIFT",
+        "reason": "goods",
+        "as_of": _SEEN,
+        "intent_id": ref.id,
+        "approval_id": ref.approval_id,
+        "attempt": attempt,
+    }
+    values.update(extra)
+    return replace_payment(conn, api, obligation_id=obligation_id, **values)
 
 
 def test_request_id_is_deterministic_and_within_bounds():
@@ -70,21 +123,25 @@ def test_request_id_is_deterministic_and_within_bounds():
     assert 10 <= len(request_id) <= 50
 
 
+def test_a_recall_does_not_pay_even_with_a_replacement_grant():
+    conn = connect()
+    obligation_id, ref = _obligation(conn)
+    api = Api()
+    api.failure_reason = "91001: Recall requested"
+
+    with pytest.raises(ReplaceError) as caught:
+        _pay(conn, api, obligation_id, ref)
+
+    assert caught.value.code == "policy"
+    assert api.created == []
+
+
 def test_duplicate_request_id_returns_the_transfer_from_the_lookup():
     conn = connect()
-    obligation_id = _obligation(conn)
+    obligation_id, ref = _obligation(conn)
     api = Api()
     api.mode = "duplicate"
-    airwallex_id = replace_payment(
-        conn,
-        api,
-        obligation_id=obligation_id,
-        attempt=1,
-        beneficiary_id="ben_1",
-        details_hash="onboarding-v1",
-        transfer_method="SWIFT",
-        reason="goods",
-    )
+    airwallex_id = _pay(conn, api, obligation_id, ref)
     assert airwallex_id == "awx-existing"
     assert api.created == ["stl-inv2291-1"]
     assert api.last["metadata"] == {"obligation_id": str(obligation_id)}
@@ -96,19 +153,10 @@ def test_duplicate_request_id_returns_the_transfer_from_the_lookup():
 
 def test_a_timeout_is_resolved_by_looking_up_the_request_id():
     conn = connect()
-    obligation_id = _obligation(conn)
+    obligation_id, ref = _obligation(conn)
     api = Api()
     api.mode = "timeout"
-    airwallex_id = replace_payment(
-        conn,
-        api,
-        obligation_id=obligation_id,
-        attempt=1,
-        beneficiary_id="ben_1",
-        details_hash="onboarding-v1",
-        transfer_method="SWIFT",
-        reason="goods",
-    )
+    airwallex_id = _pay(conn, api, obligation_id, ref)
     assert airwallex_id == "awx-existing"
     assert api.created == ["stl-inv2291-1"]
 
@@ -116,7 +164,7 @@ def test_a_timeout_is_resolved_by_looking_up_the_request_id():
 def test_concurrent_replace_makes_one_transfer(tmp_path):
     path = tmp_path / "ledger.db"
     setup = connect(path)
-    obligation_id = _obligation(setup)
+    obligation_id, ref = _obligation(setup)
     setup.close()
     api = Api()
     barrier = threading.Barrier(2)
@@ -126,18 +174,7 @@ def test_concurrent_replace_makes_one_transfer(tmp_path):
         conn = connect(path)
         try:
             barrier.wait()
-            found.append(
-                replace_payment(
-                    conn,
-                    api,
-                    obligation_id=obligation_id,
-                    attempt=1,
-                    beneficiary_id="ben_1",
-                    details_hash="onboarding-v1",
-                    transfer_method="SWIFT",
-                    reason="goods",
-                )
-            )
+            found.append(_pay(conn, api, obligation_id, ref))
         finally:
             conn.close()
 
@@ -162,59 +199,51 @@ def _send(**_kwargs):
 
 def test_a_second_replacement_is_refused_without_a_definitive_refusal():
     conn = connect()
-    obligation_id = _obligation(conn)
+    obligation_id, ref = _obligation(conn)
     api = Api()
-    replace_payment(
-        conn,
-        api,
-        obligation_id=obligation_id,
-        attempt=1,
-        beneficiary_id="ben_1",
-        details_hash="onboarding-v1",
-        transfer_method="SWIFT",
-        reason="goods",
-    )
+    _pay(conn, api, obligation_id, ref)
     with pytest.raises(ReplaceError) as caught:
-        replace_payment(conn, api, obligation_id=obligation_id, attempt=2, **_ARGS)
+        _pay(conn, api, obligation_id, ref, attempt=2)
     assert caught.value.code == "refused_sequence"
     assert api.created == ["stl-inv2291-1"]
 
 
 def test_a_timeout_with_no_lookup_stays_in_flight_and_blocks_attempt_two():
     conn = connect()
-    obligation_id = _obligation(conn)
+    obligation_id, ref = _obligation(conn)
     api = Api()
     api.mode = "timeout"
     api.found = _transfer("awx-existing", "other-id")
     with pytest.raises(ReplaceError) as caught:
-        replace_payment(conn, api, obligation_id=obligation_id, attempt=1, **_ARGS)
+        _pay(conn, api, obligation_id, ref)
     assert caught.value.code == "unknown"
     status = conn.execute("SELECT status FROM obligation").fetchone()["status"]
     assert status == "IN_FLIGHT"
     with pytest.raises(ReplaceError) as second:
-        replace_payment(conn, api, obligation_id=obligation_id, attempt=2, **_ARGS)
+        _pay(conn, api, obligation_id, ref, attempt=2)
     assert second.value.code == "refused_sequence"
     assert api.created == ["stl-inv2291-1"]
 
 
 def test_a_definitive_refusal_allows_the_next_attempt_until_three():
     conn = connect()
-    obligation_id = _obligation(conn)
+    obligation_id, ref = _obligation(conn)
     api = Api()
     api.mode = "refused"
     for attempt in (1, 2, 3):
+        ref = _grant(conn, obligation_id)
         with pytest.raises(ReplaceError) as caught:
-            replace_payment(conn, api, obligation_id=obligation_id, attempt=attempt, **_ARGS)
+            _pay(conn, api, obligation_id, ref, attempt=attempt)
         assert caught.value.code == "refused"
     with pytest.raises(ReplaceError) as caught:
-        replace_payment(conn, api, obligation_id=obligation_id, attempt=4, **_ARGS)
+        _pay(conn, api, obligation_id, ref, attempt=4)
     assert caught.value.code == "max_attempts"
     assert api.created == ["stl-inv2291-1", "stl-inv2291-2", "stl-inv2291-3"]
 
 
 def test_nothing_is_resent_past_six_days():
     conn = connect()
-    obligation_id = _obligation(conn)
+    obligation_id, ref = _obligation(conn)
     transfer_id = conn.execute(
         "SELECT id FROM transfer_record WHERE request_id = 'original-payment'"
     ).fetchone()["id"]
@@ -235,7 +264,12 @@ def test_nothing_is_resent_past_six_days():
             obligation_id=obligation_id,
             attempt=1,
             as_of="2026-11-08T00:00:00+00:00",
-            **_ARGS,
+            intent_id=ref.id,
+            approval_id=ref.approval_id,
+            beneficiary_id="ben_1",
+            details_hash="onboarding-v1",
+            transfer_method="SWIFT",
+            reason="goods",
         )
     assert caught.value.code == "too_late"
     assert api.created == []

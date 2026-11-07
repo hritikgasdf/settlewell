@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from backend.airwallex.types import BalanceHistoryPage
+from backend.policy import Action, code_from_reason, decide
 from backend.repaid import colleague_repaid
 from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
 
@@ -38,7 +39,15 @@ def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
     return RefundCard(True, text)
 
 
-def propose_replacement(conn, client, *, obligation_id: int, incident_ref: str) -> str:
+def propose_replacement(
+    conn,
+    client,
+    *,
+    obligation_id: int,
+    incident_ref: str,
+    intent_id: int | None = None,
+    as_of: str | None = None,
+) -> str:
     incident = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_ref,)).fetchone()
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
     if incident is None or obligation is None or incident["obligation_id"] != obligation_id:
@@ -70,6 +79,20 @@ def propose_replacement(conn, client, *, obligation_id: int, incident_ref: str) 
     ).fetchone()
     if version is None:
         raise ReplaceError("unverified")
+    decision = decide(
+        remote.status,
+        failure_code=code_from_reason(remote.failure_reason),
+        claim="where",
+    )
+    if decision.action not in {Action.REPLACE_SAME, Action.REPLACE_NEW_DETAILS}:
+        raise ReplaceError("policy")
+    if intent_id is None or as_of is None:
+        raise ReplaceError("approval")
+    intent = conn.execute("SELECT * FROM execution_intent WHERE id = ?", (intent_id,)).fetchone()
+    if intent is None or intent["approval_id"] is None:
+        raise ReplaceError("approval")
+    if int(intent["obligation_id"] or 0) != obligation_id:
+        raise ReplaceError("obligation")
     return replace_payment(
         conn,
         client,
@@ -81,6 +104,10 @@ def propose_replacement(conn, client, *, obligation_id: int, incident_ref: str) 
         reason="other_services",
         transfer_amount=Decimal(remote.transfer_amount),
         transfer_currency=remote.transfer_currency,
+        as_of=as_of,
+        intent_id=int(intent["id"]),
+        approval_id=int(intent["approval_id"]),
+        quote_id=intent["quote_id"],
     )
 
 

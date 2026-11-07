@@ -185,12 +185,41 @@ def _money_out(case: dict, action: str) -> bool:
         )
         conn.commit()
     client = _Pay(airwallex_id=f"awx-eval-{number}")
+    intent_id = None
+    if case.get("verified"):
+        from backend.execute import intent_terms, open_intent
+
+        ref = open_intent(
+            conn,
+            kind="replacement",
+            incident_id=incident_id,
+            obligation_id=_obligation_id(conn, incident_id),
+            action="REPLACE_SAME",
+            amount="100.00",
+            currency="EUR",
+            beneficiary_id="ben_verified",
+            details_hash="details-v2",
+            proposer=AP_CLERK,
+            failure_code="90802",
+            expires_at="2026-11-04T12:00:00+00:00",
+            created_at=_SEEN,
+        )
+        approve(
+            conn,
+            ref.approval_id,
+            intent_terms(conn, ref.id),
+            approver=FINANCE_APPROVER,
+            used_at=_SEEN,
+        )
+        intent_id = ref.id
     try:
         propose_replacement(
             conn,
             client,
             obligation_id=_obligation_id(conn, incident_id),
             incident_ref=str(incident_id),
+            intent_id=intent_id,
+            as_of=_SEEN,
         )
     except ReplaceError:
         return len(client.created) > 0
@@ -290,21 +319,69 @@ def _webhook_replay() -> tuple[str, str, bool, bool]:
     return "ERROR", "R-ERROR", False, False
 
 
+def _grant_replacement(conn, incident_id: int):
+    from backend.execute import intent_terms, open_intent
+
+    obligation_id = _obligation_id(conn, incident_id)
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at="2026-11-04T12:00:00+00:00",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
+    return ref
+
+
 def _replace_once() -> tuple[str, str, bool, bool]:
-    conn, obligation_id = _books("INV-1013")
+    conn, incident_id = _books("INV-1013")
+    obligation_id = _obligation_id(conn, incident_id)
+    ref = _grant_replacement(conn, incident_id)
     client = _Pay()
-    first = replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **_REPLACE)
-    second = replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **_REPLACE)
+    paid = {
+        **_REPLACE,
+        "as_of": _SEEN,
+        "intent_id": ref.id,
+        "approval_id": ref.approval_id,
+    }
+    first = replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **paid)
+    second = replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **paid)
     if first == second and len(client.created) == 1:
         return "ONE_TRANSFER", "R-REPLACE-LOCK", False, False
     return "ERROR", "R-ERROR", False, True
 
 
 def _replace_unknown() -> tuple[str, str, bool, bool]:
-    conn, obligation_id = _books("INV-1014")
+    conn, incident_id = _books("INV-1014")
+    obligation_id = _obligation_id(conn, incident_id)
+    ref = _grant_replacement(conn, incident_id)
     client = _Pay(timeout=True)
     try:
-        replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **_REPLACE)
+        replace_payment(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            attempt=1,
+            as_of=_SEEN,
+            intent_id=ref.id,
+            approval_id=ref.approval_id,
+            **_REPLACE,
+        )
     except ReplaceError as error:
         status = conn.execute("SELECT status FROM obligation").fetchone()["status"]
         attempt_two = conn.execute(
@@ -342,6 +419,7 @@ class _Pay:
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=self.fee_amount,
+            failure_reason="90802: Beneficiary bank returned",
             reference="INV",
         )
 

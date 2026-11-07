@@ -130,9 +130,10 @@ def _fee_card(case: dict) -> tuple[str, str, bool, bool]:
 
 def _fx_floor(_case: dict) -> tuple[str, str, bool, bool]:
     under_conn, under_incident = _books("INV-1024")
+    under_client = _Balances(eur="0.00", usd="100000.00")
     under = fund_replacement(
         under_conn,
-        _Balances(eur="0.00", usd="100000.00"),
+        under_client,
         obligation_id=_obligation_id(under_conn, under_incident),
         as_of=_SEEN,
     )
@@ -145,10 +146,46 @@ def _fx_floor(_case: dict) -> tuple[str, str, bool, bool]:
         obligation_id=_obligation_id(over_conn, over_incident),
         as_of=_SEEN,
     )
-    funded = under.action == "converted" and over.action == "escalate"
+    under_action = under.action
+    if under.action == "locked":
+        under_action = _execute_locked_quote(under_conn, under_incident, under, under_client)
+    funded = under_action == "converted" and over.action == "escalate"
     if funded:
         return "R-FX-FLOOR-CONVERT", "R-FX-LIMIT-ESCALATE", False, False
-    return under.action, over.action, False, over.action == "converted"
+    return under_action, over.action, False, over.action == "converted"
+
+
+def _execute_locked_quote(conn, incident_id: int, locked, client) -> str:
+    from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
+    from backend.execute import ExecuteError, execute, intent_terms, open_intent
+
+    ref = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=_obligation_id(conn, incident_id),
+        action="FX_FUND",
+        amount=format(locked.buy_amount, "f"),
+        currency="EUR",
+        beneficiary_id="ben_floor",
+        details_hash="fx-floor",
+        proposer=AP_CLERK,
+        quote_id=locked.quote_id,
+        expires_at="2026-11-04T12:00:00+00:00",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
+    try:
+        result = execute(conn, client, ref.id, as_of=_SEEN)
+    except ExecuteError:
+        return "ERROR"
+    return "converted" if result.status == "converted" else result.status
 
 
 def _webhook_order(_case: dict) -> tuple[str, str, bool, bool]:
@@ -256,9 +293,70 @@ def _quote_reuse(_case: dict) -> tuple[str, str, bool, bool]:
         used_at=_SEEN,
         as_of="2026-11-03T12:30:00+00:00",
     )
-    execute_fx_quote(conn, desk, approval_id, terms, as_of="2026-11-03T12:30:00+00:00")
+    from backend.approvals import approve
+    from backend.execute import intent_terms, open_intent
+
+    fx_intent = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=_obligation_id(conn, incident_id),
+        action="FX_FUND",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        quote_id="quo_eval",
+        expires_at="2026-11-03T14:00:00+00:00",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        fx_intent.approval_id,
+        intent_terms(conn, fx_intent.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
+    execute_fx_quote(
+        conn,
+        desk,
+        fx_intent.approval_id,
+        intent_terms(conn, fx_intent.id),
+        as_of="2026-11-03T12:30:00+00:00",
+        intent_id=fx_intent.id,
+    )
+    again = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=_obligation_id(conn, incident_id),
+        action="FX_FUND",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        quote_id="quo_eval",
+        expires_at="2026-11-03T14:00:00+00:00",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        again.approval_id,
+        intent_terms(conn, again.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
     try:
-        execute_fx_quote(conn, desk, approval_id, terms, as_of="2026-11-03T12:30:00+00:00")
+        execute_fx_quote(
+            conn,
+            desk,
+            again.approval_id,
+            intent_terms(conn, again.id),
+            as_of="2026-11-03T12:30:00+00:00",
+            intent_id=again.id,
+        )
     except FxQuoteError as error:
         consumed = error.code == "consumed"
     else:
@@ -273,6 +371,21 @@ def _quote_reuse(_case: dict) -> tuple[str, str, bool, bool]:
     )
     conn.commit()
     old_terms = _quote_terms("quo_old")
+    open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=_obligation_id(conn, incident_id),
+        action="FX_FUND",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        quote_id="quo_old",
+        expires_at="2026-11-03T14:00:00+00:00",
+        created_at=_SEEN,
+    )
     old_id = propose_fx_quote(conn, incident_id, old_terms, proposer=AP_CLERK)
     expired = approve_fx_quote(
         conn,

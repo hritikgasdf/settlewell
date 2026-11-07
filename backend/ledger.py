@@ -142,6 +142,28 @@ CREATE TABLE IF NOT EXISTS outbox_message (
     body TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS execution_intent (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('replacement', 'fx_conversion', 'beneficiary', 'cancel')),
+    incident_id INTEGER,
+    obligation_id INTEGER,
+    action TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    beneficiary_id TEXT NOT NULL,
+    details_hash TEXT NOT NULL,
+    quote_id TEXT,
+    target_id TEXT,
+    failure_code TEXT,
+    body_json TEXT,
+    state TEXT NOT NULL CHECK (state IN ('proposed', 'executed', 'refused')),
+    approval_id INTEGER,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    remote_id TEXT,
+    remote_status TEXT,
+    request_id TEXT
+);
 """
 
 HERO_SUPPLIER = "Lumen Textiles GmbH"
@@ -166,6 +188,7 @@ MODEL_TABLES = frozenset(
         "eval_case",
         "eval_run",
         "outbox_message",
+        "execution_intent",
     }
 )
 
@@ -186,6 +209,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(approval)")}
     if "proposer" not in columns:
         conn.execute("ALTER TABLE approval ADD COLUMN proposer TEXT")
+    intent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(execution_intent)")}
+    for name in ("remote_id", "remote_status", "request_id"):
+        if intent_columns and name not in intent_columns:
+            conn.execute(f"ALTER TABLE execution_intent ADD COLUMN {name} TEXT")
     conn.commit()
 
 

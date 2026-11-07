@@ -27,11 +27,10 @@ from backend.approvals import (
     AP_CLERK,
     FINANCE_APPROVER,
     ApprovalError,
-    ApprovalTerms,
     approve,
-    propose,
 )
 from backend.bank_change import verify_bank_change
+from backend.execute import CallbackConfirmation, execute, intent_terms, open_intent
 from backend.fx_funding import fund_replacement
 from backend.fx_quote import FxQuoteError, execute_fx_quote
 from backend.ledger import append_bank_detail_version, connect, migrate
@@ -45,6 +44,7 @@ from backend.stop_duplicate import stop_duplicate
 
 SEEN = "2026-11-03T12:00:00+00:00"
 USED = "2026-11-03T12:10:00+00:00"
+EXPIRES = "2026-11-04T12:00:00+00:00"
 LETTER = b"NO_FEE_DISPLAY synthetic confirmation INV-2291"
 HERO_ID = "awx-hero"
 DUP_ID = "awx-dup"
@@ -340,22 +340,36 @@ def _play(conn, book: HeroBook) -> HeroReplay:
 
     duplicate = decide("SENT", claim="duplicate", duplicate_status="SCHEDULED")
     remote_dup = book.get_transfer(DUP_ID)
-    stop_terms = ApprovalTerms(
+    cancel_intent = open_intent(
+        conn,
+        kind="cancel",
+        incident_id=dup_incident,
+        obligation_id=obligation_id,
         action="STOP_DUPLICATE",
         amount=str(dup_row["amount"]),
         currency=str(dup_row["currency"]),
         beneficiary_id=remote_dup.beneficiary_id or "",
         details_hash=dup_row["details_hash"] or "",
+        proposer=AP_CLERK,
+        target_id=str(dup_row["id"]),
+        expires_at=EXPIRES,
+        created_at=SEEN,
     )
-    stop_approval = propose(conn, dup_incident, stop_terms, proposer=AP_CLERK)
     approve(
         conn,
-        stop_approval,
-        stop_terms,
+        cancel_intent.approval_id,
+        intent_terms(conn, cancel_intent.id),
         approver=FINANCE_APPROVER,
         used_at=USED,
     )
-    stopped = stop_duplicate(conn, book, approval_id=stop_approval, transfer_record_id=dup_row["id"])
+    stop_approval = cancel_intent.approval_id
+    stopped = stop_duplicate(
+        conn,
+        book,
+        approval_id=stop_approval,
+        transfer_record_id=dup_row["id"],
+        as_of=USED,
+    )
     conn.execute("UPDATE transfer_record SET fee = '0.00' WHERE airwallex_id = ?", (DUP_ID,))
     conn.commit()
     beats.append(
@@ -412,9 +426,24 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         bank_name="Deutsche Kreditbank",
         account_last4="7781",
         beneficiary=_NEW_BANK,
-        attested_by="finance-approver",
-        attested_at=SEEN,
+        confirmation=CallbackConfirmation(
+            phone="+49-30-000000",
+            confirmed=True,
+            attested_by=FINANCE_APPROVER,
+            attested_at=SEEN,
+        ),
     )
+    bank_intent = conn.execute(
+        "SELECT id FROM execution_intent WHERE kind = 'beneficiary' ORDER BY id DESC LIMIT 1"
+    ).fetchone()["id"]
+    approve(
+        conn,
+        card.approval_id,
+        intent_terms(conn, bank_intent),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
+    created_bank = execute(conn, book, bank_intent, as_of=SEEN)
     beats.append(Beat("Bank change", (card.text,)))
 
     locked = refund_card(conn, book, obligation_id=obligation_id)
@@ -432,6 +461,33 @@ def _play(conn, book: HeroBook) -> HeroReplay:
 
     funding = fund_replacement(conn, book, obligation_id=obligation_id, as_of=SEEN)
     quote = conn.execute(
+        "SELECT quote_id, pair, rate, amount, state FROM fx_quote WHERE quote_id = ?",
+        (funding.quote_id,),
+    ).fetchone()
+    fx_intent = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="FX_FUND",
+        amount=quote["amount"],
+        currency="EUR",
+        beneficiary_id=created_bank.remote_id,
+        details_hash=card.details_hash,
+        proposer=AP_CLERK,
+        quote_id=quote["quote_id"],
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(
+        conn,
+        fx_intent.approval_id,
+        intent_terms(conn, fx_intent.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
+    execute(conn, book, fx_intent.id, as_of=SEEN)
+    quote = conn.execute(
         "SELECT quote_id, pair, rate, state FROM fx_quote WHERE quote_id = ?",
         (funding.quote_id,),
     ).fetchone()
@@ -440,21 +496,29 @@ def _play(conn, book: HeroBook) -> HeroReplay:
             "USD to EUR",
             (
                 f"{quote['pair']} locked quote {quote['quote_id']} rate {quote['rate']}.",
-                f"Funding {funding.action}. Quote {quote['state']}.",
+                f"Funding converted. Quote {quote['state']}.",
             ),
         )
     )
 
     recorded = book.get_transfer(HERO_ID)
-    replace_terms = ApprovalTerms(
+    replace_intent = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
         action=failure.action.value,
         amount=format(recorded.transfer_amount, "f"),
         currency=recorded.transfer_currency or "EUR",
-        beneficiary_id=card.beneficiary_id,
+        beneficiary_id=created_bank.remote_id,
         details_hash=card.details_hash,
-        quote_id=funding.quote_id,
+        proposer=AP_CLERK,
+        failure_code="90701",
+        expires_at=EXPIRES,
+        created_at=SEEN,
     )
-    approval_id = propose(conn, incident_id, replace_terms, proposer=AP_CLERK)
+    replace_terms = intent_terms(conn, replace_intent.id)
+    approval_id = replace_intent.approval_id
     try:
         approve(conn, approval_id, replace_terms, approver=AP_CLERK, used_at=USED)
     except ApprovalError as error:
@@ -462,8 +526,37 @@ def _play(conn, book: HeroBook) -> HeroReplay:
     else:
         self_approval = "approved"
     approve(conn, approval_id, replace_terms, approver=FINANCE_APPROVER, used_at=USED)
+    reuse = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="FX_FUND",
+        amount=format(funding.buy_amount or Decimal(0), "f"),
+        currency="EUR",
+        beneficiary_id=created_bank.remote_id,
+        details_hash=card.details_hash,
+        proposer=AP_CLERK,
+        quote_id=quote["quote_id"],
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(
+        conn,
+        reuse.approval_id,
+        intent_terms(conn, reuse.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
     try:
-        execute_fx_quote(conn, book, approval_id, replace_terms, as_of=SEEN)
+        execute_fx_quote(
+            conn,
+            book,
+            reuse.approval_id,
+            intent_terms(conn, reuse.id),
+            as_of=SEEN,
+            intent_id=reuse.id,
+        )
     except FxQuoteError as error:
         reuse_code = error.code
     else:
@@ -473,9 +566,18 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         book,
         obligation_id=obligation_id,
         incident_ref=str(incident_id),
+        intent_id=replace_intent.id,
+        as_of=SEEN,
     )
     try:
-        propose_replacement(conn, book, obligation_id=obligation_id, incident_ref=str(incident_id))
+        propose_replacement(
+            conn,
+            book,
+            obligation_id=obligation_id,
+            incident_ref=str(incident_id),
+            intent_id=replace_intent.id,
+            as_of=SEEN,
+        )
     except ReplaceError as error:
         second = error.code
     else:

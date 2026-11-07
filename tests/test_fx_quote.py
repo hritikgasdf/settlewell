@@ -8,6 +8,8 @@ import pytest
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import Conversion, FxQuote
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalError, ApprovalTerms, binding_hash
+from backend.approvals import approve as approve_grant
+from backend.execute import ExecuteError, execute, intent_terms, open_intent
 from backend.fx_quote import FxQuoteError, approve_fx_quote, execute_fx_quote, propose_fx_quote
 from backend.ledger import LedgerError, connect, consume_fx_quote, lock_fx_quote, migrate, seed_hero
 
@@ -69,6 +71,28 @@ def _proposed(conn, valid_to: str = VALID):
     )
     terms = _terms()
     approval_id = propose_fx_quote(conn, incident_id, terms, proposer=AP_CLERK)
+    ref = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=conn.execute("SELECT id FROM obligation").fetchone()["id"],
+        action="FX_FUND",
+        amount="4400.00",
+        currency="EUR",
+        beneficiary_id="ben_dkb",
+        details_hash="hash-dkb",
+        proposer=AP_CLERK,
+        quote_id="quo_1",
+        expires_at="2026-11-03T18:00:00+00:00",
+        created_at=USED,
+    )
+    approve_grant(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
     return terms, approval_id
 
 
@@ -119,14 +143,38 @@ def test_an_expired_quote_is_requoted_before_approval():
     fresh = conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_2'").fetchone()
     assert fresh["state"] == "LOCKED"
     assert conn.execute("SELECT used_at FROM approval WHERE id = ?", (approval_id,)).fetchone()["used_at"] is None
-    new_terms = _terms("quo_2")
+    new_intent = conn.execute(
+        "SELECT id FROM execution_intent WHERE quote_id = ?",
+        (decision.quote_id,),
+    ).fetchone()["id"]
     stored = conn.execute(
         "SELECT binding_hash FROM approval WHERE id = ?",
         (decision.approval_id,),
     ).fetchone()
-    assert stored["binding_hash"] == binding_hash(new_terms)
+    assert stored["binding_hash"] == binding_hash(intent_terms(conn, new_intent))
     assert desk.created[0]["buy_amount"] == Decimal("4400.00")
     assert desk.converted == []
+
+
+def _execute_bound(conn, client, *, as_of: str, quote_id: str = "quo_1"):
+    """Run the conversion with the execution intent's own approval, not a second grant."""
+    row = conn.execute(
+        """
+        SELECT id, approval_id FROM execution_intent
+        WHERE kind = 'fx_conversion' AND quote_id = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (quote_id,),
+    ).fetchone()
+    intent_id = int(row["id"])
+    return execute_fx_quote(
+        conn,
+        client,
+        int(row["approval_id"]),
+        intent_terms(conn, intent_id),
+        as_of=as_of,
+        intent_id=intent_id,
+    )
 
 
 def test_an_expired_quote_is_requoted_again_before_execute():
@@ -143,7 +191,7 @@ def test_an_expired_quote_is_requoted_again_before_execute():
     )
     desk = Desk()
 
-    decision = execute_fx_quote(conn, desk, approval_id, terms, as_of=LATE)
+    decision = _execute_bound(conn, desk, as_of=LATE)
 
     assert decision.outcome == "reapprove"
     assert decision.quote_id == "quo_2"
@@ -214,13 +262,13 @@ def test_a_reused_quote_is_rejected_as_consumed():
         as_of=EARLY,
     )
     desk = Desk()
-    first = execute_fx_quote(conn, desk, approval_id, terms, as_of=EARLY)
+    first = _execute_bound(conn, desk, as_of=EARLY)
     assert first.outcome == "converted"
     assert first.conversion_id == "con_1"
 
-    with pytest.raises(FxQuoteError) as caught:
-        execute_fx_quote(conn, desk, approval_id, terms, as_of=EARLY)
-    assert caught.value.code == "consumed"
+    second = _execute_bound(conn, desk, as_of=EARLY)
+    assert second.outcome == "converted"
+    assert second.conversion_id == "con_1"
     assert len(desk.converted) == 1
     assert conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["state"] == "CONSUMED"
 
@@ -259,9 +307,116 @@ def test_an_airwallex_expiry_code_requotes_and_asks_for_a_new_approval(code):
     )
     desk = Desk(fail=code)
 
-    decision = execute_fx_quote(conn, desk, approval_id, terms, as_of=EARLY)
+    decision = _execute_bound(conn, desk, as_of=EARLY)
 
     assert decision.outcome == "reapprove"
     assert decision.quote_id == "quo_2"
     assert conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()["state"] == "EXPIRED"
     assert len(desk.converted) == 1
+
+
+def test_the_replacement_quote_converts_after_its_own_approval():
+    conn = connect()
+    terms, approval_id = _proposed(conn)
+    desk = Desk()
+    decision = approve_fx_quote(
+        conn,
+        desk,
+        approval_id,
+        terms,
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+        as_of=LATE,
+    )
+    assert decision.outcome == "reapprove"
+    new_id = conn.execute(
+        "SELECT id FROM execution_intent WHERE quote_id = ?",
+        (decision.quote_id,),
+    ).fetchone()["id"]
+    old_id = conn.execute(
+        "SELECT id FROM execution_intent WHERE quote_id = 'quo_1'"
+    ).fetchone()["id"]
+    assert new_id != old_id
+    approve_grant(
+        conn,
+        decision.approval_id,
+        intent_terms(conn, new_id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
+
+    converted = execute(conn, desk, new_id, as_of=EARLY)
+    again = execute(conn, desk, new_id, as_of=EARLY)
+
+    assert converted.remote_id == "con_1"
+    assert again.remote_id == "con_1"
+    assert len(desk.converted) == 1
+
+
+def _locked_for(conn, *, quote_amount: str, intent_amount: str, currency: str, pair: str = "USD/EUR"):
+    incident_id = seed_hero(conn)
+    obligation_id = conn.execute("SELECT id FROM obligation").fetchone()["id"]
+    lock_fx_quote(
+        conn,
+        quote_id="quo_gap",
+        pair=pair,
+        rate="1.10",
+        amount=quote_amount,
+        valid_to=VALID,
+    )
+    conn.commit()
+    ref = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="FX_FUND",
+        amount=intent_amount,
+        currency=currency,
+        beneficiary_id="ben_dkb",
+        details_hash="hash-dkb",
+        proposer=AP_CLERK,
+        quote_id="quo_gap",
+        expires_at="2026-11-03T18:00:00+00:00",
+        created_at=USED,
+    )
+    approve_grant(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
+    return ref
+
+
+def test_an_fx_intent_for_a_different_amount_does_not_convert():
+    conn = connect()
+    ref = _locked_for(conn, quote_amount="100.00", intent_amount="1.00", currency="EUR")
+    desk = Desk()
+
+    with pytest.raises(ExecuteError) as caught:
+        execute(conn, desk, ref.id, as_of=EARLY)
+
+    assert caught.value.code == "void"
+    assert desk.converted == []
+    intent = conn.execute("SELECT state FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()
+    assert intent["state"] == "proposed"
+    quote = conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_gap'").fetchone()
+    assert quote["state"] == "LOCKED"
+
+
+def test_an_fx_intent_for_a_different_currency_does_not_convert():
+    conn = connect()
+    ref = _locked_for(conn, quote_amount="100.00", intent_amount="100.00", currency="USD")
+    desk = Desk()
+
+    with pytest.raises(ExecuteError) as caught:
+        execute(conn, desk, ref.id, as_of=EARLY)
+
+    assert caught.value.code == "void"
+    assert desk.converted == []
+    intent = conn.execute("SELECT state FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()
+    assert intent["state"] == "proposed"
+    quote = conn.execute("SELECT state FROM fx_quote WHERE quote_id = 'quo_gap'").fetchone()
+    assert quote["state"] == "LOCKED"

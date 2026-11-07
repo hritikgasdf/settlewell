@@ -68,24 +68,71 @@ def approve_fx_quote(
     if problem == "consumed":
         raise FxQuoteError("consumed")
     if problem == "expired":
-        return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"])
+        return _requote(
+            conn,
+            client,
+            terms,
+            incident_id=row["incident_id"],
+            proposer=row["proposer"],
+            as_of=as_of,
+        )
     approve(conn, approval_id, terms, approver=approver, used_at=used_at)
     return FxDecision("approved", str(terms.quote_id), approval_id)
 
 
-def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as_of: str) -> FxDecision:
-    """Convert a quote once. A second use is rejected. An expired quote is replaced."""
+def execute_fx_quote(
+    conn,
+    client,
+    approval_id: int,
+    terms: ApprovalTerms,
+    *,
+    as_of: str,
+    intent_id: int | None = None,
+) -> FxDecision:
+    """Convert a quote once. A second use returns the stored conversion. An expired quote is replaced."""
+    if not terms.quote_id:
+        raise FxQuoteError("quote")
+    intent = _conversion_intent(conn, str(terms.quote_id), intent_id)
+    if int(intent["approval_id"] or 0) != int(approval_id):
+        raise FxQuoteError("approval")
     row = _approval(conn, approval_id, terms)
     if row["used_at"] is None:
         raise FxQuoteError("unapproved")
+    if not _terms_are_intent(terms, intent):
+        raise FxQuoteError("void")
+    if intent["remote_id"]:
+        return FxDecision("converted", str(terms.quote_id), approval_id, intent["remote_id"])
+    quote = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
+    if quote is None:
+        raise FxQuoteError("quote")
+    sell, buy = _sell_and_buy(quote["pair"])
+    if terms.currency != buy or Decimal(terms.amount) != Decimal(quote["amount"]):
+        raise FxQuoteError("void")
     problem = _usability(conn, terms.quote_id, as_of)
     if problem == "consumed":
         raise FxQuoteError("consumed")
     if problem == "expired":
-        return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"])
-    quote = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
-    sell, buy = quote["pair"].split("/")
+        return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"], as_of=as_of)
     quote_id = str(terms.quote_id)
+    from backend.execute import ExecuteError, claim, remember_remote
+
+    try:
+        claim(
+            conn,
+            intent_id=int(intent["id"]),
+            approval_id=approval_id,
+            obligation_id=int(intent["obligation_id"]),
+            as_of=as_of,
+            kind="fx_conversion",
+            amount=terms.amount,
+            currency=terms.currency,
+            beneficiary_id=terms.beneficiary_id,
+            details_hash=terms.details_hash,
+            quote_id=quote_id,
+        )
+    except ExecuteError as error:
+        raise FxQuoteError(error.code) from error
+    conn.commit()
     try:
         consume_fx_quote(conn, quote_id, "")
     except LedgerError:
@@ -96,16 +143,30 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
             quote_id=terms.quote_id,
             buy_currency=buy,
             sell_currency=sell,
-            buy_amount=Decimal(quote["amount"]),
+            buy_amount=Decimal(terms.amount),
             request_id=conversion_request_id(quote_id),
         )
     except AirwallexError as error:
         if error.code in _AIRWALLEX_EXPIRY:
             release_unsent_fx_quote(conn, quote_id)
             conn.commit()
-            return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"])
+            return _requote(
+                conn,
+                client,
+                terms,
+                incident_id=row["incident_id"],
+                proposer=row["proposer"],
+                as_of=as_of,
+            )
         raise
     record_fx_conversion(conn, quote_id, conversion.conversion_id)
+    remember_remote(conn, int(intent["id"]), conversion.conversion_id, "converted")
+    if hasattr(client, "current_balances"):
+        from backend.fx_funding import _available, _snapshot
+
+        after = client.current_balances()
+        _snapshot(conn, "EUR", _available(after, "EUR"), as_of, "after")
+        _snapshot(conn, "USD", _available(after, "USD"), as_of, "after")
     conn.commit()
     return FxDecision("converted", str(terms.quote_id), approval_id, conversion.conversion_id)
 
@@ -137,10 +198,19 @@ def _usability(conn, quote_id: str | None, as_of: str) -> str | None:
     return None
 
 
-def _requote(conn, client, terms: ApprovalTerms, *, incident_id: int, proposer: str | None) -> FxDecision:
+def _requote(
+    conn,
+    client,
+    terms: ApprovalTerms,
+    *,
+    incident_id: int,
+    proposer: str | None,
+    as_of: str,
+) -> FxDecision:
     current = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
     if current is None or current["state"] == "CONSUMED":
         raise FxQuoteError("consumed")
+    previous = _conversion_intent(conn, str(terms.quote_id), None)
     expire_fx_quote(conn, str(terms.quote_id))
     sell, buy = current["pair"].split("/")
     amount = Decimal(current["amount"])
@@ -160,17 +230,60 @@ def _requote(conn, client, terms: ApprovalTerms, *, incident_id: int, proposer: 
         amount=format(amount, "f"),
         valid_to=quote.valid_to_at,
     )
-    new_terms = ApprovalTerms(
-        action=terms.action,
-        amount=terms.amount,
-        currency=terms.currency,
-        beneficiary_id=terms.beneficiary_id,
-        details_hash=terms.details_hash,
+    from backend.execute import open_intent
+
+    opened = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=int(previous["incident_id"]),
+        obligation_id=int(previous["obligation_id"]),
+        action=previous["action"],
+        amount=format(amount, "f"),
+        currency=buy,
+        beneficiary_id=previous["beneficiary_id"],
+        details_hash=previous["details_hash"],
+        proposer=proposer or AP_CLERK,
         quote_id=quote.quote_id,
-        evidence_hashes=terms.evidence_hashes,
+        expires_at=quote.valid_to_at,
+        created_at=as_of,
     )
-    approval_id = propose(conn, incident_id, new_terms, proposer=proposer or AP_CLERK)
-    return FxDecision("reapprove", quote.quote_id, approval_id)
+    return FxDecision("reapprove", quote.quote_id, opened.approval_id)
+
+
+def _terms_are_intent(terms: ApprovalTerms, intent) -> bool:
+    return (
+        terms.action == intent["action"]
+        and format(Decimal(terms.amount), "f") == intent["amount"]
+        and terms.currency == intent["currency"]
+        and terms.beneficiary_id == intent["beneficiary_id"]
+        and terms.details_hash == intent["details_hash"]
+        and (terms.quote_id or "") == (intent["quote_id"] or "")
+    )
+
+
+def _sell_and_buy(pair: str) -> tuple[str, str]:
+    parts = str(pair).split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise FxQuoteError("void")
+    return parts[0], parts[1]
+
+
+def _conversion_intent(conn, quote_id: str, intent_id: int | None):
+    if intent_id is not None:
+        row = conn.execute(
+            "SELECT * FROM execution_intent WHERE id = ? AND kind = 'fx_conversion'",
+            (intent_id,),
+        ).fetchone()
+        if row is None or (row["quote_id"] or "") != quote_id:
+            raise FxQuoteError("approval")
+        return row
+    rows = conn.execute(
+        "SELECT * FROM execution_intent WHERE kind = 'fx_conversion' AND quote_id = ?",
+        (quote_id,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise FxQuoteError("approval")
+    return rows[0]
 
 
 def _at(value: str) -> datetime:

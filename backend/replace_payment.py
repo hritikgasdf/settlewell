@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from backend.airwallex.client import AirwallexError
 from backend.ledger import set_obligation_status
+from backend.policy import Action, code_from_reason, decide
 
 _DEFINITIVE_REFUSAL = frozenset(
     {"insufficient_funds", "validation_failed", "amount_above_limit", "limit_exceeded"}
@@ -42,6 +43,9 @@ def replace_payment(
     as_of: str | None = None,
     transfer_amount: Decimal | None = None,
     transfer_currency: str | None = None,
+    intent_id: int | None = None,
+    approval_id: int | None = None,
+    quote_id: str | None = None,
 ) -> str:
     """Create at most one transfer for this attempt. Amount and currency come from the obligation."""
     obligation = conn.execute("SELECT * FROM obligation WHERE id = ?", (obligation_id,)).fetchone()
@@ -55,18 +59,46 @@ def replace_payment(
     request_id = replacement_request_id(obligation["invoice_ref"], attempt)
     conn.execute("BEGIN IMMEDIATE")
     try:
-        existing = _by_request_id(conn, request_id)
-        if existing is not None and existing["airwallex_id"]:
-            conn.commit()
-            return str(existing["airwallex_id"])
-        if existing is not None:
-            conn.rollback()
-            raise ReplaceError("in_flight")
-        if _other_live(conn, obligation_id, request_id):
-            conn.rollback()
-            raise ReplaceError("live")
         amount = transfer_amount if transfer_amount is not None else Decimal(obligation["amount"])
         currency = transfer_currency or obligation["currency"]
+        if intent_id is None or approval_id is None or as_of is None:
+            conn.rollback()
+            raise ReplaceError("approval")
+        _refuse_unless_replaceable(conn, client, obligation)
+        from backend.execute import ExecuteError, claim, remember_remote
+
+        try:
+            claimed = claim(
+                conn,
+                intent_id=intent_id,
+                approval_id=approval_id,
+                obligation_id=obligation_id,
+                as_of=as_of,
+                kind="replacement",
+                amount=format(amount, "f"),
+                currency=currency,
+                beneficiary_id=beneficiary_id,
+                details_hash=details_hash,
+                quote_id=quote_id,
+            )
+        except ExecuteError as error:
+            conn.rollback()
+            raise ReplaceError(error.code) from error
+        if claimed.remote_id:
+            conn.commit()
+            return claimed.remote_id
+        if not claimed.fresh:
+            existing = _by_request_id(conn, request_id)
+            if existing is not None and existing["airwallex_id"]:
+                remember_remote(conn, intent_id, str(existing["airwallex_id"]), "sent")
+                conn.commit()
+                return str(existing["airwallex_id"])
+            conn.rollback()
+            raise ReplaceError("in_flight")
+        existing = _by_request_id(conn, request_id)
+        if existing is not None or _other_live(conn, obligation_id, request_id):
+            conn.rollback()
+            raise ReplaceError("live")
         remote = _create_or_find(
             client,
             obligation,
@@ -86,6 +118,7 @@ def replace_payment(
             amount=format(amount, "f"),
             currency=currency,
         )
+        remember_remote(conn, intent_id, str(remote.id), remote.status)
         conn.commit()
     except ReplaceError as error:
         if error.code == "unknown":
@@ -110,6 +143,27 @@ def replace_payment(
         conn.commit()
         raise ReplaceError("person")
     return str(remote.id)
+
+
+def _refuse_unless_replaceable(conn, client, obligation) -> None:
+    """A recall or any non-replace code never creates a payout, even with a grant."""
+    live_id = obligation["live_transfer_id"]
+    original = None
+    if live_id is not None:
+        original = conn.execute(
+            "SELECT airwallex_id FROM transfer_record WHERE id = ?",
+            (live_id,),
+        ).fetchone()
+    if original is None or not original["airwallex_id"]:
+        raise ReplaceError("policy")
+    remote = client.get_transfer(original["airwallex_id"])
+    decision = decide(
+        remote.status,
+        failure_code=code_from_reason(remote.failure_reason),
+        claim="where",
+    )
+    if decision.action not in {Action.REPLACE_SAME, Action.REPLACE_NEW_DETAILS}:
+        raise ReplaceError("policy")
 
 
 def _create_or_find(

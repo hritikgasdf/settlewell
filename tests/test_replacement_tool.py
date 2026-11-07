@@ -6,6 +6,8 @@ from decimal import Decimal
 import pytest
 
 from backend.airwallex.types import BalanceHistoryItem, BalanceHistoryPage, Transfer, TransferPage
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
+from backend.execute import intent_terms, open_intent
 from backend.ledger import connect, seed_hero
 from backend.replacement_tool import propose_replacement
 
@@ -22,6 +24,7 @@ class Record:
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=Decimal("13.47"),
+            failure_reason="90802: Beneficiary bank returned",
             reference="INV-2291",
         )
 
@@ -64,7 +67,8 @@ class Record:
 
 def test_the_tool_signature_has_no_amount():
     params = inspect.signature(propose_replacement).parameters
-    assert set(params) == {"conn", "client", "obligation_id", "incident_ref"}
+    assert set(params) == {"conn", "client", "obligation_id", "incident_ref", "intent_id", "as_of"}
+    assert "amount" not in params
     with pytest.raises(TypeError):
         propose_replacement(object(), object(), obligation_id=1, incident_ref="1", amount="1")
 
@@ -94,12 +98,36 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
         (supplier_id,),
     )
     conn.commit()
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.50",
+        currency="EUR",
+        beneficiary_id="ben_verified",
+        details_hash="callback-v2",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at="2026-11-04T12:00:00+00:00",
+        created_at="2026-11-03T12:00:00+00:00",
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at="2026-11-03T12:00:00+00:00",
+    )
     client = Record()
     airwallex_id = propose_replacement(
         conn,
         client,
         obligation_id=obligation_id,
         incident_ref=str(incident_id),
+        intent_id=ref.id,
+        as_of="2026-11-03T12:00:00+00:00",
     )
     assert airwallex_id == "awx-new"
     sent = client.created[0]

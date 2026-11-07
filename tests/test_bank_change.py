@@ -12,8 +12,9 @@ from backend.airwallex.types import (
     Transfer,
     TransferPage,
 )
-from backend.approvals import ApprovalTerms, binding_hash
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalTerms, approve, binding_hash
 from backend.bank_change import BankChangeError, verify_bank_change
+from backend.execute import CallbackConfirmation, execute, intent_terms, open_intent
 from backend.ledger import connect, seed_hero
 from backend.replace_payment import ReplaceError
 from backend.replacement_tool import propose_replacement
@@ -59,10 +60,11 @@ class Desk:
         return Transfer(
             id=transfer_id,
             status="CANCELLED",
-            transfer_amount=Decimal(4200),
+            transfer_amount=Decimal("4200.00"),
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=Decimal("13.47"),
+            failure_reason="90802: Beneficiary bank returned",
             reference="INV-2291",
         )
 
@@ -72,7 +74,7 @@ class Desk:
                 BalanceHistoryItem(
                     id="rev-1",
                     source="awx-hero",
-                    amount=Decimal(4200),
+                    amount=Decimal("4200.00"),
                     currency="EUR",
                     balance=None,
                     description="Refund",
@@ -123,8 +125,12 @@ def _change(conn, client, obligation_id, incident_ref, **overrides):
         "bank_name": "Deutsche Kreditbank",
         "account_last4": "7781",
         "beneficiary": NEW_BANK,
-        "attested_by": "finance-approver",
-        "attested_at": "2026-11-03T12:00:00+00:00",
+        "confirmation": CallbackConfirmation(
+            phone="+49-30-000000",
+            confirmed=True,
+            attested_by="finance-approver",
+            attested_at="2026-11-03T12:00:00+00:00",
+        ),
     }
     fields.update(overrides)
     return verify_bank_change(conn, client, **fields)
@@ -183,7 +189,15 @@ def test_a_valid_iban_still_waits_for_the_call_back():
     client = Desk()
 
     with pytest.raises(BankChangeError) as caught:
-        _change(conn, client, obligation_id, incident_ref, attested_by=None, attested_at=None)
+        _change(
+            conn,
+            client,
+            obligation_id,
+            incident_ref,
+            attested_by=None,
+            attested_at=None,
+            confirmation=None,
+        )
 
     assert caught.value.code == "callback"
     assert client.validated
@@ -197,13 +211,28 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
     client = Desk()
 
     card = _change(conn, client, obligation_id, incident_ref)
+    assert client.created == []
+    intent_id = conn.execute(
+        "SELECT id FROM execution_intent WHERE kind = 'beneficiary'"
+    ).fetchone()["id"]
+    approve(
+        conn,
+        card.approval_id,
+        intent_terms(conn, intent_id),
+        approver=FINANCE_APPROVER,
+        used_at="2026-11-03T12:00:00+00:00",
+    )
+    created = execute(conn, client, intent_id, as_of="2026-11-03T12:00:00+00:00")
     again = _change(conn, client, obligation_id, incident_ref)
 
     assert card.text == "Commerzbank → DKB ···4400 → ···7781"
     assert again.text == card.text
-    assert again.beneficiary_id == card.beneficiary_id
+    assert created.remote_id == "ben_dkb"
+    assert again.beneficiary_id == "ben_dkb"
     sent = {key: value for key, value in NEW_BANK.items() if key != "id"}
-    assert client.created == [sent]
+    assert client.created[0]["request_id"].startswith("stl-ben-")
+    body = {key: value for key, value in client.created[0].items() if key != "request_id"}
+    assert body == sent
     assert client.updated == []
     version = conn.execute(
         """
@@ -222,13 +251,41 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
             action="NEW_BENEFICIARY",
             amount="4200.00",
             currency="EUR",
-            beneficiary_id="ben_dkb",
+            beneficiary_id="",
             details_hash=version["details_hash"],
+            evidence_hashes=(f"intent:{intent_id}",),
         )
     )
     assert card.approval_id == conn.execute("SELECT id FROM approval").fetchone()["id"]
+    pay_intent = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=int(incident_ref),
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_dkb",
+        details_hash=version["details_hash"],
+        proposer=AP_CLERK,
+        failure_code="90802",
+        expires_at="2026-11-04T12:00:00+00:00",
+        created_at="2026-11-03T12:00:00+00:00",
+    )
+    approve(
+        conn,
+        pay_intent.approval_id,
+        intent_terms(conn, pay_intent.id),
+        approver=FINANCE_APPROVER,
+        used_at="2026-11-03T12:10:00+00:00",
+    )
     paid = propose_replacement(
-        conn, client, obligation_id=obligation_id, incident_ref=incident_ref
+        conn,
+        client,
+        obligation_id=obligation_id,
+        incident_ref=incident_ref,
+        intent_id=pay_intent.id,
+        as_of="2026-11-03T12:10:00+00:00",
     )
     assert paid == "awx-new"
     assert client.paid[0]["beneficiary_id"] == "ben_dkb"
