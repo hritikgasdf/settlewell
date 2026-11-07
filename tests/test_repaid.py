@@ -201,6 +201,362 @@ def test_two_covered_known_payments_are_not_silently_chosen():
     assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
 
 
+class Lifecycle(Account):
+    """Account whose colleague payment status and reversal evidence are set per phase."""
+
+    def __init__(self, colleague_status: str, *, reversal: bool = True) -> None:
+        super().__init__(
+            (
+                _transfer("awx-hero", "CANCELLED", "original-payment", beneficiary_id="ben_old"),
+                _transfer("awx-colleague", colleague_status, "colleague-hand"),
+            )
+        )
+        self.reversal = reversal
+
+    def balance_history(self, **kwargs):
+        page = super().balance_history(**kwargs)
+        return page if self.reversal else BalanceHistoryPage(items=(), has_more=False, page_after=None)
+
+
+def _audit_kinds(conn):
+    return [
+        (row["kind"], row["detail"])
+        for row in conn.execute(
+            "SELECT kind, detail FROM audit_event WHERE kind IN "
+            "('colleague_tracked','colleague_repaid','colleague_reopened',"
+            "'original_disposition','replacement_disposition') ORDER BY id"
+        )
+    ]
+
+
+def _live_airwallex_id(conn, obligation_id):
+    return conn.execute(
+        "SELECT t.airwallex_id FROM obligation o JOIN transfer_record t ON t.id = o.live_transfer_id WHERE o.id = ?",
+        (obligation_id,),
+    ).fetchone()["airwallex_id"]
+
+
+@pytest.mark.parametrize("nonfinal", ["PROCESSING", "SENT", "OVERDUE"])
+def test_a_nonfinal_colleague_payment_stays_open_then_closes_when_paid(tmp_path, nonfinal):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    tracking = colleague_repaid(conn, Lifecycle(nonfinal), obligation_id=obligation_id, incident_ref=incident_ref)
+    assert tracking.action == "track"
+    assert tracking.airwallex_id == "awx-colleague"
+    conn.close()
+
+    for _ in range(2):  # repeated checks while nonfinal: still blocked, no new side effects
+        conn = connect(path)
+        account = Lifecycle(nonfinal)
+        assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+        assert _live_airwallex_id(conn, obligation_id) == "awx-hero"
+        with pytest.raises(ReplaceError) as caught:
+            propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+        assert caught.value.code == "repaid"
+        assert account.created == []
+        again = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+        assert again.action == "track"
+        assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+        assert _audit_kinds(conn) == [("colleague_tracked", "awx-colleague")]
+        assert conn.execute("SELECT COUNT(*) AS n FROM incident").fetchone()["n"] == 1
+        assert conn.execute("SELECT COUNT(*) AS n FROM transfer_record").fetchone()["n"] == 2
+        conn.close()
+
+    conn = connect(path)
+    paid = colleague_repaid(conn, Lifecycle("PAID"), obligation_id=obligation_id, incident_ref=incident_ref)
+    assert paid.action == "close"
+    assert paid.airwallex_id == "awx-colleague"
+    conn.close()
+
+    conn = connect(path)
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "CLOSED"
+    assert _live_airwallex_id(conn, obligation_id) == "awx-colleague"
+    stored = conn.execute("SELECT status FROM transfer_record WHERE airwallex_id = 'awx-colleague'").fetchone()
+    assert stored["status"] == "PAID"
+    assert conn.execute("SELECT status FROM obligation WHERE id = ?", (obligation_id,)).fetchone()["status"] == "PAID_ONCE"
+    kinds = _audit_kinds(conn)
+    assert ("original_disposition", "awx-hero:returned") in kinds
+    assert ("replacement_disposition", "awx-colleague:PAID") in kinds
+    assert ("colleague_repaid", "awx-colleague") in kinds
+    again = colleague_repaid(conn, Lifecycle("PAID"), obligation_id=obligation_id, incident_ref=incident_ref)
+    assert again.action == "close"
+    assert _audit_kinds(conn) == kinds
+    conn.close()
+
+
+@pytest.mark.parametrize("nonfinal", ["PROCESSING", "SENT", "OVERDUE"])
+@pytest.mark.parametrize("failed", ["FAILED", "CANCELLED"])
+def test_a_nonfinal_colleague_payment_that_fails_reopens_and_allows_replacement(tmp_path, nonfinal, failed):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    assert colleague_repaid(
+        conn, Lifecycle(nonfinal), obligation_id=obligation_id, incident_ref=incident_ref
+    ).action == "track"
+    conn.close()
+
+    conn = connect(path)
+    account = Lifecycle(failed)
+    decision = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert decision.action == "replace"
+    conn.close()
+
+    conn = connect(path)
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    assert _live_airwallex_id(conn, obligation_id) == "awx-hero"
+    stored = conn.execute("SELECT status FROM transfer_record WHERE airwallex_id = 'awx-colleague'").fetchone()
+    assert stored["status"] == failed
+    kinds = _audit_kinds(conn)
+    assert ("original_disposition", "awx-hero:returned") in kinds
+    assert ("replacement_disposition", f"awx-colleague:{failed}") in kinds
+    assert ("colleague_reopened", f"awx-colleague:{failed}") in kinds
+    assert not any(kind == "colleague_repaid" for kind, _ in kinds)
+    # The colleague gate no longer blocks. The next gate is the missing approval.
+    with pytest.raises(ReplaceError) as caught:
+        propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert caught.value.code != "repaid"
+    assert account.created == []
+    assert colleague_repaid(
+        conn, account, obligation_id=obligation_id, incident_ref=incident_ref
+    ).action == "replace"
+    assert _audit_kinds(conn) == kinds
+    assert conn.execute("SELECT COUNT(*) AS n FROM incident").fetchone()["n"] == 1
+    conn.close()
+
+
+class Unlisted(Lifecycle):
+    """The unfiltered discovery list omits the colleague payments; GET still has them."""
+
+    def __init__(self, statuses: dict[str, str], *, reversal: bool = True) -> None:
+        super().__init__("PROCESSING", reversal=reversal)
+        self.items = (
+            _transfer("awx-hero", "CANCELLED", "original-payment", beneficiary_id="ben_old"),
+            *(_transfer(tid, status, f"req-{tid}") for tid, status in statuses.items()),
+        )
+        self.hidden = set(statuses)
+
+    def list_transfers(self, **_kwargs):
+        return TransferPage(items=tuple(i for i in self.items if i.id not in self.hidden), page_after=None)
+
+
+def _track(conn, incident_ref, *ids):
+    from backend.ledger import append_audit
+
+    for tid in ids:
+        append_audit(conn, incident_id=int(incident_ref), kind="colleague_tracked", detail=tid, created_at="t")
+    conn.commit()
+
+
+@pytest.mark.parametrize(
+    ("status", "action"), [("PROCESSING", "track"), ("SENT", "track"), ("OVERDUE", "track"), ("PAID", "close")]
+)
+def test_a_tracked_payment_missing_from_the_list_is_resolved_by_get_after_restart(tmp_path, status, action):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    assert colleague_repaid(
+        conn, Lifecycle("PROCESSING"), obligation_id=obligation_id, incident_ref=incident_ref
+    ).action == "track"
+    conn.close()
+
+    conn = connect(path)
+    account = Unlisted({"awx-colleague": status})
+    if action == "track":
+        with pytest.raises(ReplaceError) as caught:
+            propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+        assert caught.value.code == "repaid"
+        assert account.created == []
+    decision = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert decision.action == action
+    assert decision.airwallex_id == "awx-colleague"
+    conn.close()
+
+    conn = connect(path)
+    state = conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"]
+    assert state == ("CLOSED" if action == "close" else "OPEN")
+    if action == "close":
+        assert _live_airwallex_id(conn, obligation_id) == "awx-colleague"
+        assert ("replacement_disposition", "awx-colleague:PAID") in _audit_kinds(conn)
+        with pytest.raises(ReplaceError) as caught:
+            propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+        assert caught.value.code == "repaid"
+    else:
+        assert _live_airwallex_id(conn, obligation_id) == "awx-hero"
+        assert not any(k in ("colleague_reopened", "colleague_repaid") for k, _ in _audit_kinds(conn))
+
+
+@pytest.mark.parametrize("failed", ["FAILED", "CANCELLED"])
+def test_a_tracked_payment_missing_from_the_list_that_failed_reopens(tmp_path, failed):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    colleague_repaid(conn, Lifecycle("SENT"), obligation_id=obligation_id, incident_ref=incident_ref)
+    conn.close()
+
+    conn = connect(path)
+    account = Unlisted({"awx-colleague": failed})
+    with pytest.raises(ReplaceError) as caught:
+        propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert caught.value.code != "repaid"
+    assert ("colleague_reopened", f"awx-colleague:{failed}") in _audit_kinds(conn)
+    assert account.created == []
+
+
+def test_one_final_failure_does_not_hide_another_live_tracked_payment(tmp_path):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    _track(conn, incident_ref, "awx-a", "awx-b")
+    account = Unlisted({"awx-a": "FAILED", "awx-b": "PROCESSING"})
+    assert colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref).action == "track"
+    with pytest.raises(ReplaceError) as caught:
+        propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert caught.value.code == "repaid"
+    conn.close()
+
+    conn = connect(path)
+    kinds = _audit_kinds(conn)
+    assert ("colleague_reopened", "awx-a:FAILED") in kinds
+    assert not any(k == "colleague_reopened" and d.startswith("awx-b") for k, d in kinds)
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    # The second one fails too: now, and only now, replacement is allowed.
+    account = Unlisted({"awx-a": "FAILED", "awx-b": "CANCELLED"})
+    assert colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref).action == "replace"
+    assert ("colleague_reopened", "awx-b:CANCELLED") in _audit_kinds(conn)
+
+
+def test_an_unknown_tracked_status_holds_even_when_another_tracked_payment_failed(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    obligation_id, incident_ref = _returned(conn)
+    _track(conn, incident_ref, "awx-a", "awx-b")
+    account = Unlisted({"awx-a": "WEIRD", "awx-b": "FAILED"})
+
+    decision = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+
+    assert decision.action == "hold"
+    assert ("colleague_reopened", "awx-b:FAILED") in _audit_kinds(conn)
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    with pytest.raises(ReplaceError) as caught:
+        propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert caught.value.code == "repaid"
+
+
+def test_a_tracked_colleague_payment_with_an_unknown_status_stays_blocked(tmp_path):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    colleague_repaid(conn, Lifecycle("PROCESSING"), obligation_id=obligation_id, incident_ref=incident_ref)
+    conn.close()
+
+    conn = connect(path)
+    decision = colleague_repaid(conn, Lifecycle("WEIRD"), obligation_id=obligation_id, incident_ref=incident_ref)
+    assert decision.action == "hold"
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    assert not any(kind in ("colleague_repaid", "colleague_reopened") for kind, _ in _audit_kinds(conn))
+
+
+def test_a_paid_colleague_does_not_close_without_independent_return_evidence(tmp_path):
+    conn = connect(tmp_path / "ledger.db")
+    obligation_id, incident_ref = _returned(conn)
+
+    decision = colleague_repaid(
+        conn, Lifecycle("PAID", reversal=False), obligation_id=obligation_id, incident_ref=incident_ref
+    )
+
+    assert decision.action == "hold"
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    assert _live_airwallex_id(conn, obligation_id) == "awx-hero"
+    assert _audit_kinds(conn) == []
+
+
+@pytest.mark.parametrize("failed", ["FAILED", "CANCELLED"])
+def test_a_closed_colleague_payment_that_later_fails_reopens_on_a_direct_call_after_restart(tmp_path, failed):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    assert colleague_repaid(conn, Lifecycle("PAID"), obligation_id=obligation_id, incident_ref=incident_ref).action == "close"
+    conn.close()
+
+    conn = connect(path)
+    account = Lifecycle(failed)
+    decision = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert decision.action == "replace"
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    assert conn.execute("SELECT status FROM obligation WHERE id = ?", (obligation_id,)).fetchone()["status"] != "PAID_ONCE"
+    assert _live_airwallex_id(conn, obligation_id) == "awx-hero"
+    with pytest.raises(ReplaceError) as caught:
+        propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert caught.value.code != "repaid"  # the next gate is the missing approval
+    assert account.created == []
+    conn.close()
+
+
+@pytest.mark.parametrize("stale", ["SENT", "PROCESSING", "PAID"])
+@pytest.mark.parametrize("failed", ["FAILED", "CANCELLED"])
+def test_a_terminal_colleague_failure_outranks_later_stale_reads_across_restarts(tmp_path, failed, stale):
+    path = tmp_path / "ledger.db"
+    conn = connect(path)
+    obligation_id, incident_ref = _returned(conn)
+    conn.close()
+    expected = [("PROCESSING", "track", "OPEN"), ("PAID", "close", "CLOSED"), (failed, "replace", "OPEN")]
+    for status, action, state in expected:
+        conn = connect(path)
+        decision = colleague_repaid(conn, Lifecycle(status), obligation_id=obligation_id, incident_ref=incident_ref)
+        assert (status, decision.action) == (status, action)
+        assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == state
+        conn.close()
+
+    for status in (stale, "PAID"):  # stale reads after the terminal failure, each after a restart
+        conn = connect(path)
+        account = Lifecycle(status)
+        decision = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+        assert decision.action not in ("close", "track")
+        assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+        stored = conn.execute("SELECT status FROM transfer_record WHERE airwallex_id = 'awx-colleague'").fetchone()
+        assert stored["status"] == failed
+        assert conn.execute("SELECT status FROM obligation WHERE id = ?", (obligation_id,)).fetchone()["status"] != "PAID_ONCE"
+        assert _live_airwallex_id(conn, obligation_id) == "awx-hero"
+        with pytest.raises(ReplaceError) as caught:
+            propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+        assert caught.value.code != "repaid"  # next gate is the missing approval
+        assert account.created == []
+        assert conn.execute("SELECT COUNT(*) AS n FROM incident").fetchone()["n"] == 1
+        conn.close()
+
+
+@pytest.mark.parametrize("visible_paid", [True, False])
+def test_a_known_unpaid_extra_missing_from_the_list_blocks_close_and_replace(tmp_path, visible_paid):
+    from backend.ledger import insert_external_transfer
+
+    conn = connect(tmp_path / "ledger.db")
+    obligation_id, incident_ref = _returned(conn)
+    insert_external_transfer(  # discovered by an earlier poll, never colleague_tracked
+        conn,
+        airwallex_id="awx-extra",
+        request_id="req-awx-extra",
+        obligation_id=obligation_id,
+        amount="4200.00",
+        currency="EUR",
+        status="SENT",
+        reference="INV-2291",
+    )
+    conn.commit()
+    account = Unlisted({"awx-extra": "PROCESSING"})
+    if visible_paid:
+        account.items = (*account.items, _transfer("awx-colleague", "PAID", "colleague-hand"))
+
+    decision = colleague_repaid(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+
+    assert decision.action == "hold"
+    assert conn.execute("SELECT state FROM incident WHERE id = ?", (incident_ref,)).fetchone()["state"] == "OPEN"
+    assert not any(kind == "colleague_repaid" for kind, _ in _audit_kinds(conn))
+    with pytest.raises(ReplaceError) as caught:
+        propose_replacement(conn, account, obligation_id=obligation_id, incident_ref=incident_ref)
+    assert caught.value.code == "repaid"
+    assert account.created == []
+
+
 def test_a_return_without_a_colleague_payment_still_allows_a_replacement_decision():
     conn = connect()
     obligation_id, incident_ref = _returned(conn)

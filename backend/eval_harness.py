@@ -422,6 +422,8 @@ class _Pay:
         self.created: list[str] = []
 
     def get_transfer(self, transfer_id: str) -> Transfer:
+        if self.colleague is not None and transfer_id == self.colleague.id:
+            return self.colleague
         return Transfer(
             id=transfer_id,
             status=self.remote_status,

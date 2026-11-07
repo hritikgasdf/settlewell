@@ -40,6 +40,8 @@ def _reversal() -> BalanceHistoryItem:
 
 class ClosedApi:
     def get_transfer(self, transfer_id):
+        if transfer_id == "awx-dup":
+            return _transfer("awx-dup", "SCHEDULED", request_id="colleague-friday")
         return _transfer(
             transfer_id,
             "CANCELLED",
@@ -82,7 +84,8 @@ def test_poll_builds_a_timeline_and_tags_the_external_lookalike():
     assert external["origin"] == "external"
     assert external["request_id"] == "colleague-friday"
     assert len(second) == len(first)
-    assert conn.execute("SELECT COUNT(*) AS n FROM status_snapshot").fetchone()["n"] == 1
+    # one snapshot for the original and one for the tagged external; the refresh adds none
+    assert conn.execute("SELECT COUNT(*) AS n FROM status_snapshot").fetchone()["n"] == 2
     assert conn.execute("SELECT status FROM obligation").fetchone()["status"] == "OPEN"
 
 

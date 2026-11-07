@@ -1065,7 +1065,17 @@ def _scan_client(pages: dict, first: str):
             return TransferPage(items=(), page_after=None)
         return pages[kwargs.get("page") or first]
 
+    original_get = client.get_transfer
+
+    def get_transfer(transfer_id):
+        for page in pages.values():
+            for item in page.items:
+                if item.id == transfer_id:
+                    return item
+        return original_get(transfer_id)
+
     client.list_transfers = list_transfers
+    client.get_transfer = get_transfer
     return client
 
 

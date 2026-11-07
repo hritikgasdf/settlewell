@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.airwallex.types import BalanceHistoryPage
+from backend.outcomes import reversal_for
 from backend.paid_once import find_matches, scan_paid_once
 from backend.policy import Action, code_from_reason, decide
-from backend.repaid import colleague_repaid
+from backend.repaid import _unresolved_tracked, colleague_repaid, open_extra, terminal_ids
 from backend.replace_payment import (
     ReplaceError,
     replace_payment,
@@ -63,13 +63,16 @@ def _own_attempt_recorded(conn, intent_id: int | None) -> bool:
 
 def _refuse_on_scan(conn, client, obligation_id: int, incident_ref: str) -> None:
     """One complete supplier-aware scan. Any match or ambiguity refuses before the payout."""
-    matches = find_matches(conn, client, obligation_id)
-    if not matches:
+    dead = terminal_ids(conn, obligation_id)  # a stored FAILED/CANCELLED outranks a stale live listing
+    matches = [(kind, remote) for kind, remote in find_matches(conn, client, obligation_id) if remote.id not in dead]
+    if not matches and not _unresolved_tracked(conn, int(incident_ref)) and not open_extra(conn, client, obligation_id):
         return
     decision = colleague_repaid(
         conn, client, obligation_id=obligation_id, incident_ref=incident_ref, matches=matches
     )
     if decision.action == "replace":
+        if not matches:
+            return  # every tracked payment is now final and not paid
         # Original not yet cancelled or unlinked: still record the matches, never send.
         scan_paid_once(conn, client, obligation_id, matches)
     raise ReplaceError("repaid")
@@ -186,23 +189,7 @@ def _next_attempt(conn, invoice_ref: str) -> int:
     return max(numbers, default=0) + 1
 
 
-def _reversal_for(client, transfer_id: str, currency: str | None):
-    if not currency:
-        return None
-    page_token = None
-    for _ in range(5):
-        history: BalanceHistoryPage = client.balance_history(
-            currency=currency,
-            page_size=10,
-            page=page_token,
-        )
-        for item in history.items:
-            if item.transaction_type == "PAYOUT_REVERSAL" and item.source == transfer_id:
-                return item
-        if not history.has_more or not history.page_after:
-            return None
-        page_token = history.page_after
-    return None
+_reversal_for = reversal_for
 
 
 _SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}

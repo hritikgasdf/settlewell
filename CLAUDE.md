@@ -33,10 +33,11 @@
 - `backend/ledger.py` — SQLite ledger. Versions, snapshots, and the audit log are append-only.
 - `backend/mock_replay.py` — Offline replay of the hero. Statuses, the letter, the reversal, and the quote are canned.
 - `backend/outbox.py` — Supplier replies stay here until a person approves them. Nothing is sent.
+- `backend/outcomes.py` — One complete-set outcome reducer for the original and every replacement. Unknown evidence never counts as success.
 - `backend/paid_once.py` — Account-wide scan: a second live payment for one invoice is its own incident.
 - `backend/policy.py` — Deterministic payment-incident policy. Codes come from Airwallex's failure-reasons table.
 - `backend/proof.py` — Status-gated proof, a labelled ETA, and a TRACE draft. Nothing is sent.
-- `backend/reconcile.py` — Build an incident timeline from transfer reads. No webhooks.
+- `backend/reconcile.py` — Recover our attempts by stored request id, read every payment, decide close or reopen once. No webhooks.
 - `backend/repaid.py` — After a return, a colleague's payment for the same invoice is not replaced.
 - `backend/replace_payment.py` — One replacement per attempt. The request id is shared by concurrent callers.
 - `backend/replacement_tool.py` — The only replacement tool. Callers pass an obligation and an incident, never an amount.
