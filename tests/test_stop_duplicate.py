@@ -1,5 +1,7 @@
 """A scheduled duplicate cancels at zero cost. An unsupported update is re-read."""
 
+import sqlite3
+
 import pytest
 
 from backend.airwallex.client import AirwallexError
@@ -67,6 +69,7 @@ def _ready(conn):
         details_hash="colleague-v1",
         proposer=AP_CLERK,
         target_id=str(inserted),
+        expires_at="2026-11-04T12:00:00+00:00",
         created_at="2026-11-03T12:00:00+00:00",
     )
     approve(
@@ -86,7 +89,9 @@ def test_an_approved_scheduled_duplicate_cancels_with_no_ledger_impact():
     before_amount = conn.execute("SELECT amount FROM obligation").fetchone()["amount"]
     before_balances = conn.execute("SELECT COUNT(*) AS n FROM balance_snapshot").fetchone()["n"]
 
-    result = stop_duplicate(conn, api, approval_id=approval_id, transfer_record_id=transfer_id)
+    result = stop_duplicate(
+        conn, api, approval_id=approval_id, transfer_record_id=transfer_id, as_of="2026-11-03T12:00:00+00:00"
+    )
 
     assert result.cancelled is True
     assert result.status == "CANCELLED"
@@ -107,7 +112,13 @@ def test_cancel_is_refused_without_an_approval():
     conn.execute("UPDATE approval SET used_at = NULL, approver = NULL WHERE id = ?", (approval_id,))
     conn.commit()
     with pytest.raises(StopDuplicateError) as caught:
-        stop_duplicate(conn, api, approval_id=approval_id, transfer_record_id=transfer_id)
+        stop_duplicate(
+            conn,
+            api,
+            approval_id=approval_id,
+            transfer_record_id=transfer_id,
+            as_of="2026-11-03T12:00:00+00:00",
+        )
     assert caught.value.code == "not_approved"
     assert api.cancels == 0
 
@@ -127,10 +138,79 @@ def test_update_unsupported_is_reread_and_not_marked_cancelled():
 
     api = Moved()
     approval_id, transfer_id = _ready(conn)
-    result = stop_duplicate(conn, api, approval_id=approval_id, transfer_record_id=transfer_id)
+    result = stop_duplicate(
+        conn, api, approval_id=approval_id, transfer_record_id=transfer_id, as_of="2026-11-03T12:00:00+00:00"
+    )
     assert result.cancelled is False
     assert result.reread is True
     assert result.status == "SENT"
     assert api.cancels == 1
     stored = conn.execute("SELECT status FROM transfer_record WHERE id = ?", (transfer_id,)).fetchone()
     assert stored["status"] == "SENT"
+
+
+def test_a_processing_duplicate_is_refused_and_the_grant_stays_open():
+    conn = connect()
+    api = DuplicateApi(status="PROCESSING")
+    approval_id, transfer_id = _ready(conn)
+
+    result = stop_duplicate(
+        conn,
+        api,
+        approval_id=approval_id,
+        transfer_record_id=transfer_id,
+        as_of="2026-11-03T12:00:00+00:00",
+    )
+
+    assert result.cancelled is False
+    assert result.status == "PROCESSING"
+    assert result.reread is True
+    assert api.cancels == 0
+    state = conn.execute("SELECT state FROM execution_intent").fetchone()["state"]
+    assert state == "proposed"
+
+
+class _FailingCommit:
+    def __init__(self, conn, *, fail_on: int) -> None:
+        self._conn = conn
+        self.fail_on = fail_on
+        self.commits = 0
+        self.armed = True
+
+    def commit(self) -> None:
+        self.commits += 1
+        if self.armed and self.commits == self.fail_on:
+            raise sqlite3.OperationalError("disk")
+        self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_cancel_recovers_after_the_local_write_fails():
+    conn = connect()
+    api = DuplicateApi()
+    approval_id, transfer_id = _ready(conn)
+    proxy = _FailingCommit(conn, fail_on=2)
+    with pytest.raises(sqlite3.OperationalError):
+        stop_duplicate(
+            proxy,
+            api,
+            approval_id=approval_id,
+            transfer_record_id=transfer_id,
+            as_of="2026-11-03T12:00:00+00:00",
+        )
+    proxy.rollback()
+    proxy.armed = False
+
+    result = stop_duplicate(
+        proxy,
+        api,
+        approval_id=approval_id,
+        transfer_record_id=transfer_id,
+        as_of="2026-11-03T12:00:00+00:00",
+    )
+
+    assert result.cancelled is True
+    assert result.status == "CANCELLED"
+    assert api.cancels == 1

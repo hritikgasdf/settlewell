@@ -44,6 +44,7 @@ from backend.stop_duplicate import stop_duplicate
 
 SEEN = "2026-11-03T12:00:00+00:00"
 USED = "2026-11-03T12:10:00+00:00"
+EXPIRES = "2026-11-04T12:00:00+00:00"
 LETTER = b"NO_FEE_DISPLAY synthetic confirmation INV-2291"
 HERO_ID = "awx-hero"
 DUP_ID = "awx-dup"
@@ -351,6 +352,7 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         details_hash=dup_row["details_hash"] or "",
         proposer=AP_CLERK,
         target_id=str(dup_row["id"]),
+        expires_at=EXPIRES,
         created_at=SEEN,
     )
     approve(
@@ -361,7 +363,13 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         used_at=USED,
     )
     stop_approval = cancel_intent.approval_id
-    stopped = stop_duplicate(conn, book, approval_id=stop_approval, transfer_record_id=dup_row["id"])
+    stopped = stop_duplicate(
+        conn,
+        book,
+        approval_id=stop_approval,
+        transfer_record_id=dup_row["id"],
+        as_of=USED,
+    )
     conn.execute("UPDATE transfer_record SET fee = '0.00' WHERE airwallex_id = ?", (DUP_ID,))
     conn.commit()
     beats.append(
@@ -468,6 +476,7 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         details_hash=card.details_hash,
         proposer=AP_CLERK,
         quote_id=quote["quote_id"],
+        expires_at=EXPIRES,
         created_at=SEEN,
     )
     approve(
@@ -505,6 +514,7 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         details_hash=card.details_hash,
         proposer=AP_CLERK,
         failure_code="90701",
+        expires_at=EXPIRES,
         created_at=SEEN,
     )
     replace_terms = intent_terms(conn, replace_intent.id)
@@ -516,13 +526,36 @@ def _play(conn, book: HeroBook) -> HeroReplay:
     else:
         self_approval = "approved"
     approve(conn, approval_id, replace_terms, approver=FINANCE_APPROVER, used_at=USED)
+    reuse = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="FX_FUND",
+        amount=format(funding.buy_amount or Decimal(0), "f"),
+        currency="EUR",
+        beneficiary_id=created_bank.remote_id,
+        details_hash=card.details_hash,
+        proposer=AP_CLERK,
+        quote_id=quote["quote_id"],
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(
+        conn,
+        reuse.approval_id,
+        intent_terms(conn, reuse.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
     try:
         execute_fx_quote(
             conn,
             book,
-            fx_intent.approval_id,
-            intent_terms(conn, fx_intent.id),
+            reuse.approval_id,
+            intent_terms(conn, reuse.id),
             as_of=SEEN,
+            intent_id=reuse.id,
         )
     except FxQuoteError as error:
         reuse_code = error.code
@@ -533,9 +566,18 @@ def _play(conn, book: HeroBook) -> HeroReplay:
         book,
         obligation_id=obligation_id,
         incident_ref=str(incident_id),
+        intent_id=replace_intent.id,
+        as_of=SEEN,
     )
     try:
-        propose_replacement(conn, book, obligation_id=obligation_id, incident_ref=str(incident_id))
+        propose_replacement(
+            conn,
+            book,
+            obligation_id=obligation_id,
+            incident_ref=str(incident_id),
+            intent_id=replace_intent.id,
+            as_of=SEEN,
+        )
     except ReplaceError as error:
         second = error.code
     else:

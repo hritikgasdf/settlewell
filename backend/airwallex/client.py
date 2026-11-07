@@ -205,6 +205,26 @@ class AirwallexClient:
         data = payload if isinstance(payload, dict) else {}
         return Beneficiary(id=str(data["id"]), nickname=_optional_str(data.get("nickname")))
 
+    def find_beneficiary(self, request_id: str) -> Beneficiary | None:
+        """Look up a beneficiary created with this request id. None when the list has no row."""
+        payload = self._json(
+            "GET",
+            "/api/v1/beneficiaries",
+            query=[("request_id", request_id), ("page_size", 10)],
+        )
+        if isinstance(payload, dict):
+            items = payload.get("items") or []
+        elif isinstance(payload, list):
+            items = payload
+        else:
+            items = []
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            if item.get("request_id") == request_id:
+                return Beneficiary(id=str(item["id"]), nickname=_optional_str(item.get("nickname")))
+        return None
+
     def create_confirmation_letter(self, *, transaction_id: str, letter_format: str) -> ConfirmationLetter:
         response = self._send(
             "POST",

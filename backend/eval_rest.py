@@ -171,6 +171,7 @@ def _execute_locked_quote(conn, incident_id: int, locked, client) -> str:
         details_hash="fx-floor",
         proposer=AP_CLERK,
         quote_id=locked.quote_id,
+        expires_at="2026-11-04T12:00:00+00:00",
         created_at=_SEEN,
     )
     approve(
@@ -307,6 +308,7 @@ def _quote_reuse(_case: dict) -> tuple[str, str, bool, bool]:
         details_hash="details-v1",
         proposer=AP_CLERK,
         quote_id="quo_eval",
+        expires_at="2026-11-03T14:00:00+00:00",
         created_at=_SEEN,
     )
     approve(
@@ -316,9 +318,45 @@ def _quote_reuse(_case: dict) -> tuple[str, str, bool, bool]:
         approver=FINANCE_APPROVER,
         used_at=_SEEN,
     )
-    execute_fx_quote(conn, desk, approval_id, terms, as_of="2026-11-03T12:30:00+00:00")
+    execute_fx_quote(
+        conn,
+        desk,
+        fx_intent.approval_id,
+        intent_terms(conn, fx_intent.id),
+        as_of="2026-11-03T12:30:00+00:00",
+        intent_id=fx_intent.id,
+    )
+    again = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=_obligation_id(conn, incident_id),
+        action="FX_FUND",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        quote_id="quo_eval",
+        expires_at="2026-11-03T14:00:00+00:00",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        again.approval_id,
+        intent_terms(conn, again.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
     try:
-        execute_fx_quote(conn, desk, approval_id, terms, as_of="2026-11-03T12:30:00+00:00")
+        execute_fx_quote(
+            conn,
+            desk,
+            again.approval_id,
+            intent_terms(conn, again.id),
+            as_of="2026-11-03T12:30:00+00:00",
+            intent_id=again.id,
+        )
     except FxQuoteError as error:
         consumed = error.code == "consumed"
     else:
@@ -333,6 +371,21 @@ def _quote_reuse(_case: dict) -> tuple[str, str, bool, bool]:
     )
     conn.commit()
     old_terms = _quote_terms("quo_old")
+    open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=_obligation_id(conn, incident_id),
+        action="FX_FUND",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        quote_id="quo_old",
+        expires_at="2026-11-03T14:00:00+00:00",
+        created_at=_SEEN,
+    )
     old_id = propose_fx_quote(conn, incident_id, old_terms, proposer=AP_CLERK)
     expired = approve_fx_quote(
         conn,

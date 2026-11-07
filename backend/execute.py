@@ -6,6 +6,7 @@ Public surface:
 - execute
 - claim
 - CallbackConfirmation
+- normalize_timestamp
 
 Do not call Airwallex money or beneficiary APIs except from execute or from a
 helper that has claimed an intent inside execute.
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from backend.approvals import (
@@ -27,6 +28,15 @@ from backend.approvals import (
 from backend.policy import Action, code_from_reason, decide
 
 _REPLACE = {Action.REPLACE_SAME.value, Action.REPLACE_NEW_DETAILS.value}
+_BENEFICIARY_KEYS = (
+    "body",
+    "bank_name",
+    "account_last4",
+    "phone",
+    "confirmed",
+    "attested_by",
+    "attested_at",
+)
 
 
 class ExecuteError(Exception):
@@ -59,6 +69,33 @@ class ExecuteResult:
     status: str
 
 
+@dataclass(frozen=True)
+class Claimed:
+    """One intent after claim. fresh is false when this call recovered an earlier execution."""
+
+    intent_id: int
+    fresh: bool
+    remote_id: str | None
+    remote_status: str | None
+    request_id: str | None
+
+
+def normalize_timestamp(value: str) -> str:
+    """UTC ISO-8601. Z and numeric offsets compare as the same instant."""
+    if not isinstance(value, str) or not value.strip():
+        raise ExecuteError("expiry")
+    text = value.strip().replace("Z", "+00:00")
+    if len(text) >= 5 and text[-5] in "+-" and ":" not in text[-5:]:
+        text = text[:-2] + ":" + text[-2:]
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ExecuteError("expiry") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
+
+
 def open_intent(
     conn,
     *,
@@ -81,6 +118,10 @@ def open_intent(
     """Persist the intent and the approval proposal. Does not call Airwallex."""
     if kind not in {"replacement", "fx_conversion", "beneficiary", "cancel"}:
         raise ExecuteError("kind")
+    if obligation_id is None:
+        raise ExecuteError("obligation")
+    expiry = _expiry(expires_at)
+    opened = _moment(created_at)
     cursor = conn.execute(
         """
         INSERT INTO execution_intent (
@@ -102,8 +143,8 @@ def open_intent(
             target_id,
             failure_code,
             body_json,
-            expires_at,
-            created_at,
+            expiry,
+            opened,
         ),
     )
     intent_id = int(cursor.lastrowid)
@@ -112,7 +153,7 @@ def open_intent(
         incident_id,
         _terms(conn, intent_id),
         proposer=proposer,
-        expires_at=expires_at,
+        expires_at=expiry,
     )
     conn.execute(
         "UPDATE execution_intent SET approval_id = ? WHERE id = ?",
@@ -123,8 +164,10 @@ def open_intent(
 
 
 def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
-    """Run one approved intent. Refuses when the grant is missing, expired, or the policy says no."""
+    """Run one approved intent. A second call returns the remote result it already stored."""
     intent = _intent(conn, intent_id)
+    if intent["state"] == "executed":
+        return _resume(conn, client, intent, as_of)
     _ready(conn, intent, as_of)
     if intent["kind"] == "replacement":
         _replacement_policy(conn, client, intent)
@@ -135,6 +178,8 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
             client,
             obligation_id=int(intent["obligation_id"]),
             incident_ref=str(intent["incident_id"]),
+            intent_id=int(intent["id"]),
+            as_of=as_of,
         )
         return ExecuteResult("replacement", remote_id, "sent")
     if intent["kind"] == "fx_conversion":
@@ -143,11 +188,12 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
         terms = _terms(conn, intent_id)
         try:
             decision = execute_fx_quote(
-            conn,
-            client,
-            int(intent["approval_id"]),
-            terms,
-            as_of=as_of,
+                conn,
+                client,
+                int(intent["approval_id"]),
+                terms,
+                as_of=as_of,
+                intent_id=intent_id,
             )
         except FxQuoteError as error:
             raise ExecuteError(error.code) from error
@@ -155,17 +201,7 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
             raise ExecuteError(decision.outcome)
         return ExecuteResult("fx_conversion", decision.conversion_id, "converted")
     if intent["kind"] == "beneficiary":
-        claim(
-            conn,
-            kind="beneficiary",
-            amount=intent["amount"],
-            currency=intent["currency"],
-            beneficiary_id=intent["beneficiary_id"],
-            details_hash=intent["details_hash"],
-            as_of=as_of,
-        )
-        remote_id = _create_beneficiary(conn, client, intent)
-        return ExecuteResult("beneficiary", remote_id, "created")
+        return _execute_beneficiary(conn, client, intent, as_of)
     if intent["kind"] == "cancel":
         from backend.stop_duplicate import stop_duplicate
 
@@ -174,6 +210,7 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
             client,
             approval_id=int(intent["approval_id"]),
             transfer_record_id=int(intent["target_id"]),
+            as_of=as_of,
         )
         if not stopped.cancelled:
             raise ExecuteError("status_" + stopped.status)
@@ -181,48 +218,61 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
     raise ExecuteError("kind")
 
 
-def claim(conn, *, kind: str, amount: str, currency: str, beneficiary_id: str, details_hash: str, quote_id: str | None = None, target_id: str | None = None, as_of: str | None = None) -> int:
-    """Atomically take one matching approved intent. Raises ExecuteError if none is payable."""
-    blocked = False
-    expired = False
-    rows = conn.execute(
-        """
-        SELECT * FROM execution_intent
-        WHERE kind = ? AND state = 'proposed'
-          AND amount = ? AND currency = ? AND beneficiary_id = ? AND details_hash = ?
-          AND COALESCE(quote_id, '') = ? AND COALESCE(target_id, '') = ?
-        ORDER BY id
-        """,
-        (
-            kind,
-            format(Decimal(amount), "f"),
-            currency,
-            beneficiary_id,
-            details_hash,
-            quote_id or "",
-            target_id or "",
-        ),
-    ).fetchall()
-    for intent in rows:
-        try:
-            _ready(conn, intent, as_of)
-        except ExecuteError as error:
-            expired = expired or error.code == "expired"
-            continue
-        if kind == "replacement" and not _code_may_pay(intent["failure_code"]):
-            blocked = True
-            continue
-        cursor = conn.execute(
-            "UPDATE execution_intent SET state = 'executed' WHERE id = ? AND state = 'proposed'",
-            (intent["id"],),
-        )
-        if cursor.rowcount == 1:
-            return int(intent["id"])
-    if blocked:
+def claim(
+    conn,
+    *,
+    intent_id: int,
+    approval_id: int,
+    obligation_id: int,
+    as_of: str,
+    kind: str,
+    amount: str,
+    currency: str,
+    beneficiary_id: str,
+    details_hash: str,
+    quote_id: str | None = None,
+    target_id: str | None = None,
+    request_id: str | None = None,
+) -> Claimed:
+    """Take this intent, or recover it. Never selects another row with the same terms."""
+    intent = _intent(conn, intent_id)
+    if int(intent["approval_id"] or 0) != int(approval_id):
+        raise ExecuteError("approval")
+    if int(intent["obligation_id"] or 0) != int(obligation_id):
+        raise ExecuteError("obligation")
+    if not _same_terms(
+        intent,
+        kind=kind,
+        amount=amount,
+        currency=currency,
+        beneficiary_id=beneficiary_id,
+        details_hash=details_hash,
+        quote_id=quote_id,
+        target_id=target_id,
+    ):
+        raise ExecuteError("void")
+    if intent["state"] == "executed":
+        return _claimed(intent, fresh=False)
+    if intent["state"] != "proposed":
+        raise ExecuteError("approval")
+    _ready(conn, intent, as_of)
+    if kind == "replacement" and not _code_may_pay(intent["failure_code"]):
         raise ExecuteError("policy")
-    if expired:
-        raise ExecuteError("expired")
-    raise ExecuteError("approval")
+    cursor = conn.execute(
+        """
+        UPDATE execution_intent
+        SET state = 'executed', request_id = COALESCE(?, request_id)
+        WHERE id = ? AND state = 'proposed'
+        """,
+        (request_id, intent_id),
+    )
+    if cursor.rowcount != 1:
+        current = _intent(conn, intent_id)
+        if current["state"] == "executed":
+            return _claimed(current, fresh=False)
+        raise ExecuteError("approval")
+    stored = request_id or intent["request_id"]
+    return Claimed(intent_id, True, None, None, stored)
 
 
 def callback_ok(confirmation: CallbackConfirmation, *, phone_on_file: str | None, proposer: str) -> None:
@@ -236,9 +286,208 @@ def callback_ok(confirmation: CallbackConfirmation, *, phone_on_file: str | None
     if confirmation.attested_by not in DEMO_IDENTITIES or confirmation.attested_by == proposer:
         raise ExecuteError("callback")
     try:
-        datetime.fromisoformat(confirmation.attested_at)
-    except ValueError:
+        normalize_timestamp(confirmation.attested_at)
+    except ExecuteError:
         raise ExecuteError("callback") from None
+
+
+def intent_terms(conn, intent_id: int) -> ApprovalTerms:
+    """The approval terms bound to this intent. P0-2 approves these terms."""
+    return _terms(conn, intent_id)
+
+
+def remember_remote(conn, intent_id: int, remote_id: str, status: str) -> None:
+    """Store the remote id on the intent that produced it."""
+    conn.execute(
+        """
+        UPDATE execution_intent
+        SET remote_id = ?, remote_status = ?
+        WHERE id = ?
+        """,
+        (remote_id, status, intent_id),
+    )
+
+
+def _resume(conn, client, intent, as_of: str) -> ExecuteResult:
+    if intent["remote_id"]:
+        return ExecuteResult(
+            intent["kind"],
+            str(intent["remote_id"]),
+            intent["remote_status"] or "recovered",
+        )
+    if intent["kind"] == "beneficiary":
+        return _execute_beneficiary(conn, client, intent, as_of)
+    if intent["kind"] == "cancel":
+        from backend.stop_duplicate import stop_duplicate
+
+        stopped = stop_duplicate(
+            conn,
+            client,
+            approval_id=int(intent["approval_id"]),
+            transfer_record_id=int(intent["target_id"]),
+            as_of=as_of,
+        )
+        if not stopped.cancelled:
+            raise ExecuteError("status_" + stopped.status)
+        return ExecuteResult("cancel", str(intent["target_id"]), stopped.status)
+    if intent["kind"] == "replacement":
+        from backend.replacement_tool import propose_replacement
+
+        remote_id = propose_replacement(
+            conn,
+            client,
+            obligation_id=int(intent["obligation_id"]),
+            incident_ref=str(intent["incident_id"]),
+            intent_id=int(intent["id"]),
+            as_of=as_of,
+        )
+        return ExecuteResult("replacement", remote_id, "sent")
+    if intent["kind"] == "fx_conversion":
+        from backend.fx_quote import FxQuoteError, execute_fx_quote
+
+        try:
+            decision = execute_fx_quote(
+                conn,
+                client,
+                int(intent["approval_id"]),
+                _terms(conn, int(intent["id"])),
+                as_of=as_of,
+                intent_id=int(intent["id"]),
+            )
+        except FxQuoteError as error:
+            raise ExecuteError(error.code) from error
+        if not decision.conversion_id:
+            raise ExecuteError(decision.outcome)
+        return ExecuteResult("fx_conversion", decision.conversion_id, "converted")
+    raise ExecuteError("kind")
+
+
+def _execute_beneficiary(conn, client, intent, as_of: str) -> ExecuteResult:
+    wrapped = _beneficiary_guard(conn, intent)
+    request_id = intent["request_id"] or f"stl-ben-{int(intent['id'])}"
+    claimed = claim(
+        conn,
+        intent_id=int(intent["id"]),
+        approval_id=int(intent["approval_id"]),
+        obligation_id=int(intent["obligation_id"]),
+        as_of=as_of,
+        kind="beneficiary",
+        amount=intent["amount"],
+        currency=intent["currency"],
+        beneficiary_id=intent["beneficiary_id"],
+        details_hash=intent["details_hash"],
+        quote_id=intent["quote_id"],
+        target_id=intent["target_id"],
+        request_id=request_id,
+    )
+    conn.commit()
+    if claimed.remote_id:
+        return ExecuteResult("beneficiary", claimed.remote_id, claimed.remote_status or "created")
+    if not claimed.fresh:
+        found = _lookup_beneficiary(client, request_id)
+        if found is None:
+            raise ExecuteError("in_flight")
+        _store_beneficiary(conn, intent, wrapped, found.id)
+        remember_remote(conn, int(intent["id"]), found.id, "created")
+        conn.commit()
+        return ExecuteResult("beneficiary", found.id, "created")
+    body = dict(wrapped["body"])
+    body["request_id"] = request_id
+    created = client.create_beneficiary(body)
+    _store_beneficiary(conn, intent, wrapped, created.id)
+    remember_remote(conn, int(intent["id"]), created.id, "created")
+    conn.commit()
+    return ExecuteResult("beneficiary", created.id, "created")
+
+
+def _lookup_beneficiary(client, request_id: str):
+    finder = getattr(client, "find_beneficiary", None)
+    if finder is None:
+        return None
+    return finder(request_id)
+
+
+def _store_beneficiary(conn, intent, wrapped: dict, remote_id: str) -> None:
+    existing = conn.execute(
+        """
+        SELECT id FROM bank_detail_version
+        WHERE beneficiary_id = ? AND details_hash = ? AND source = 'verified_callback'
+        """,
+        (remote_id, intent["details_hash"]),
+    ).fetchone()
+    if existing is not None:
+        return
+    conn.execute(
+        """
+        INSERT INTO bank_detail_version (
+            supplier_id, beneficiary_id, details_hash, bank_name, account_last4,
+            source, verified_by, verified_at
+        )
+        SELECT obligation.supplier_id, ?, ?, ?, ?,
+               'verified_callback', ?, ?
+        FROM obligation
+        WHERE obligation.id = ?
+        """,
+        (
+            remote_id,
+            intent["details_hash"],
+            wrapped["bank_name"],
+            wrapped["account_last4"],
+            wrapped["attested_by"],
+            intent["created_at"],
+            intent["obligation_id"],
+        ),
+    )
+
+
+def _beneficiary_guard(conn, intent) -> dict:
+    """The execute boundary. A hand-built body_json is not a call-back."""
+    try:
+        wrapped = json.loads(intent["body_json"] or "")
+    except json.JSONDecodeError:
+        raise ExecuteError("callback") from None
+    if not isinstance(wrapped, dict) or any(key not in wrapped for key in _BENEFICIARY_KEYS):
+        raise ExecuteError("callback")
+    if wrapped["confirmed"] is not True or not isinstance(wrapped["body"], dict):
+        raise ExecuteError("callback")
+    approval = conn.execute(
+        "SELECT proposer FROM approval WHERE id = ?",
+        (intent["approval_id"],),
+    ).fetchone()
+    proposer = approval["proposer"] if approval is not None else ""
+    confirmation = CallbackConfirmation(
+        phone=str(wrapped["phone"]),
+        confirmed=True,
+        attested_by=str(wrapped["attested_by"]),
+        attested_at=str(wrapped["attested_at"]),
+    )
+    phone = _phone_on_file(conn, int(intent["obligation_id"]))
+    callback_ok(confirmation, phone_on_file=phone, proposer=proposer or "")
+    from backend.bank_change import beneficiary_details_hash
+
+    digest = beneficiary_details_hash(
+        str(wrapped["bank_name"]),
+        str(wrapped["account_last4"]),
+        wrapped["body"],
+    )
+    if digest != intent["details_hash"]:
+        raise ExecuteError("void")
+    return wrapped
+
+
+def _phone_on_file(conn, obligation_id: int) -> str | None:
+    row = conn.execute(
+        """
+        SELECT supplier.phone_on_file
+        FROM obligation
+        JOIN supplier ON supplier.id = obligation.supplier_id
+        WHERE obligation.id = ?
+        """,
+        (obligation_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row["phone_on_file"]
 
 
 def _intent(conn, intent_id: int):
@@ -246,11 +495,6 @@ def _intent(conn, intent_id: int):
     if row is None:
         raise ExecuteError("missing")
     return row
-
-
-def intent_terms(conn, intent_id: int) -> ApprovalTerms:
-    """The approval terms bound to this intent. P0-2 approves these terms."""
-    return _terms(conn, intent_id)
 
 
 def _terms(conn, intent_id: int) -> ApprovalTerms:
@@ -266,6 +510,28 @@ def _terms(conn, intent_id: int) -> ApprovalTerms:
     )
 
 
+def _same_terms(intent, *, kind: str, amount: str, currency: str, beneficiary_id: str, details_hash: str, quote_id: str | None, target_id: str | None) -> bool:
+    return (
+        intent["kind"] == kind
+        and intent["amount"] == format(Decimal(amount), "f")
+        and intent["currency"] == currency
+        and intent["beneficiary_id"] == beneficiary_id
+        and intent["details_hash"] == details_hash
+        and (intent["quote_id"] or "") == (quote_id or "")
+        and (intent["target_id"] or "") == (target_id or "")
+    )
+
+
+def _claimed(intent, *, fresh: bool) -> Claimed:
+    return Claimed(
+        int(intent["id"]),
+        fresh,
+        intent["remote_id"],
+        intent["remote_status"],
+        intent["request_id"],
+    )
+
+
 def _ready(conn, intent, as_of: str | None) -> None:
     if intent["approval_id"] is None:
         raise ExecuteError("unapproved")
@@ -278,10 +544,27 @@ def _ready(conn, intent, as_of: str | None) -> None:
     if approval["approver"] == approval["proposer"]:
         raise ExecuteError("self")
     expires = intent["expires_at"] or approval["expires_at"]
-    if expires and (as_of is None or as_of >= expires):
+    if not expires:
+        raise ExecuteError("expiry")
+    if _moment(as_of) >= _expiry(expires):
         raise ExecuteError("expired")
     if binding_hash(_terms(conn, int(intent["id"]))) != approval["binding_hash"]:
         raise ExecuteError("void")
+
+
+def _expiry(value: str | None) -> str:
+    if value is None:
+        raise ExecuteError("expiry")
+    return normalize_timestamp(value)
+
+
+def _moment(value: str | None) -> str:
+    if value is None:
+        raise ExecuteError("as_of")
+    try:
+        return normalize_timestamp(value)
+    except ExecuteError:
+        raise ExecuteError("as_of") from None
 
 
 def _code_may_pay(failure_code: str | None) -> bool:
@@ -309,32 +592,3 @@ def _replacement_policy(conn, client, intent) -> None:
         raise ExecuteError("policy")
     if intent["failure_code"] and intent["failure_code"] != code:
         raise ExecuteError("policy")
-
-
-def _create_beneficiary(conn, client, intent) -> str:
-    wrapped = json.loads(intent["body_json"] or "{}")
-    body = wrapped["body"]
-    created = client.create_beneficiary(body)
-    conn.execute(
-        """
-        INSERT INTO bank_detail_version (
-            supplier_id, beneficiary_id, details_hash, bank_name, account_last4,
-            source, verified_by, verified_at
-        )
-        SELECT obligation.supplier_id, ?, ?, ?, ?,
-               'verified_callback', ?, ?
-        FROM obligation
-        WHERE obligation.id = ?
-        """,
-        (
-            created.id,
-            intent["details_hash"],
-            wrapped["bank_name"],
-            wrapped["account_last4"],
-            wrapped["attested_by"],
-            intent["created_at"],
-            intent["obligation_id"],
-        ),
-    )
-    conn.commit()
-    return created.id

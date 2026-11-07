@@ -67,7 +67,8 @@ class Record:
 
 def test_the_tool_signature_has_no_amount():
     params = inspect.signature(propose_replacement).parameters
-    assert set(params) == {"conn", "client", "obligation_id", "incident_ref"}
+    assert set(params) == {"conn", "client", "obligation_id", "incident_ref", "intent_id", "as_of"}
+    assert "amount" not in params
     with pytest.raises(TypeError):
         propose_replacement(object(), object(), obligation_id=1, incident_ref="1", amount="1")
 
@@ -109,6 +110,7 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
         details_hash="callback-v2",
         proposer=AP_CLERK,
         failure_code="90802",
+        expires_at="2026-11-04T12:00:00+00:00",
         created_at="2026-11-03T12:00:00+00:00",
     )
     approve(
@@ -124,6 +126,8 @@ def test_amount_and_beneficiary_come_from_the_record_not_the_caller():
         client,
         obligation_id=obligation_id,
         incident_ref=str(incident_id),
+        intent_id=ref.id,
+        as_of="2026-11-03T12:00:00+00:00",
     )
     assert airwallex_id == "awx-new"
     sent = client.created[0]

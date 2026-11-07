@@ -1,5 +1,6 @@
 """Money moves only through the execution service. No network."""
 
+import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -15,7 +16,7 @@ from backend.execute import (
     open_intent,
 )
 from backend.fx_funding import fund_replacement
-from backend.ledger import connect, seed_hero
+from backend.ledger import connect, migrate, seed_hero
 from backend.replace_payment import ReplaceError, replace_payment
 from backend.replacement_tool import propose_replacement
 
@@ -24,8 +25,9 @@ EXPIRES = "2026-11-03T13:00:00+00:00"
 
 
 class Pay:
-    def __init__(self, *, reason: str = "90701: Account closed") -> None:
+    def __init__(self, *, reason: str = "90701: Account closed", amount: str = "4200.00") -> None:
         self.reason = reason
+        self.amount = amount
         self.created: list[dict] = []
         self.conversions: list[dict] = []
         self.beneficiaries: list[dict] = []
@@ -37,7 +39,7 @@ class Pay:
             id=transfer_id,
             status="CANCELLED",
             request_id="original-payment",
-            transfer_amount=Decimal("4200.00"),
+            transfer_amount=Decimal(self.amount),
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=Decimal("13.47"),
@@ -160,7 +162,16 @@ def _ready(conn, *, reason: str = "90701: Account closed"):
     return obligation_id, incident_id
 
 
-def _grant(conn, incident_id, *, failure_code: str = "90701", expires_at: str | None = None):
+def _grant(
+    conn,
+    incident_id,
+    *,
+    failure_code: str = "90701",
+    expires_at: str | None = EXPIRES,
+    quote_id: str | None = None,
+    amount: str = "4200.00",
+    beneficiary_id: str = "ben_verified",
+):
     ref = open_intent(
         conn,
         kind="replacement",
@@ -170,12 +181,13 @@ def _grant(conn, incident_id, *, failure_code: str = "90701", expires_at: str | 
             (incident_id,),
         ).fetchone()["obligation_id"],
         action="REPLACE_NEW_DETAILS",
-        amount="4200.00",
+        amount=amount,
         currency="EUR",
-        beneficiary_id="ben_verified",
+        beneficiary_id=beneficiary_id,
         details_hash="callback-v2",
         proposer=AP_CLERK,
         failure_code=failure_code,
+        quote_id=quote_id,
         expires_at=expires_at,
         created_at=SEEN,
     )
@@ -194,10 +206,32 @@ def test_a_replacement_without_approval_does_not_pay():
     obligation_id, incident_id = _ready(conn)
     client = Pay()
 
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_NEW_DETAILS",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_verified",
+        details_hash="callback-v2",
+        proposer=AP_CLERK,
+        failure_code="90701",
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
     with pytest.raises(ReplaceError) as caught:
-        propose_replacement(conn, client, obligation_id=obligation_id, incident_ref=str(incident_id))
+        propose_replacement(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            incident_ref=str(incident_id),
+            intent_id=ref.id,
+            as_of=SEEN,
+        )
 
-    assert caught.value.code == "approval"
+    assert caught.value.code == "unapproved"
     assert client.created == []
 
 
@@ -225,17 +259,8 @@ def test_an_approved_replacement_pays_once():
     assert isinstance(result, ExecuteResult)
     assert result.remote_id == "awx-new"
     assert len(client.created) == 1
-    again = replace_payment(
-        conn,
-        client,
-        obligation_id=_obligation_id,
-        attempt=1,
-        beneficiary_id="ben_verified",
-        details_hash="callback-v2",
-        transfer_method="SWIFT",
-        reason="other_services",
-    )
-    assert again == "awx-new"
+    again = execute(conn, client, ref.id, as_of=SEEN)
+    assert again.remote_id == "awx-new"
     assert len(client.created) == 1
 
 
@@ -243,10 +268,17 @@ def test_an_expired_grant_does_not_pay():
     conn = connect()
     obligation_id, incident_id = _ready(conn)
     client = Pay()
-    _grant(conn, incident_id, expires_at="2026-11-03T11:00:00+00:00")
+    ref = _grant(conn, incident_id, expires_at="2026-11-03T11:00:00+00:00")
 
     with pytest.raises(ReplaceError) as caught:
-        propose_replacement(conn, client, obligation_id=obligation_id, incident_ref=str(incident_id))
+        propose_replacement(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            incident_ref=str(incident_id),
+            intent_id=ref.id,
+            as_of=SEEN,
+        )
 
     assert caught.value.code == "expired"
     assert client.created == []
@@ -271,6 +303,7 @@ def test_fx_conversion_waits_for_approval_of_the_locked_quote():
         details_hash="callback-v2",
         proposer=AP_CLERK,
         quote_id=locked.quote_id,
+        expires_at=EXPIRES,
         created_at=SEEN,
     )
     with pytest.raises(ExecuteError) as caught:
@@ -287,8 +320,8 @@ def test_fx_conversion_waits_for_approval_of_the_locked_quote():
     result = execute(conn, client, ref.id, as_of=SEEN)
     assert result.status == "converted"
     assert len(client.conversions) == 1
-    with pytest.raises(ExecuteError):
-        execute(conn, client, ref.id, as_of=SEEN)
+    again = execute(conn, client, ref.id, as_of=SEEN)
+    assert again.remote_id == result.remote_id
     assert len(client.conversions) == 1
 
 
@@ -348,3 +381,397 @@ def test_free_text_is_not_a_call_back_and_create_waits_for_approval():
 
 def _intent_id(conn) -> int:
     return int(conn.execute("SELECT id FROM execution_intent ORDER BY id DESC LIMIT 1").fetchone()["id"])
+
+
+def test_a_finite_expiry_still_pays_before_it_lapses():
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    client = Pay()
+    ref = _grant(conn, incident_id, expires_at="2026-11-03T13:00:00Z")
+
+    result = execute(conn, client, ref.id, as_of="2026-11-03T12:30:00+00:00")
+
+    assert result.remote_id == "awx-new"
+    assert len(client.created) == 1
+
+
+def test_an_open_intent_without_an_expiry_is_refused():
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+
+    with pytest.raises(ExecuteError) as caught:
+        open_intent(
+            conn,
+            kind="replacement",
+            incident_id=incident_id,
+            obligation_id=_obligation_id,
+            action="REPLACE_NEW_DETAILS",
+            amount="4200.00",
+            currency="EUR",
+            beneficiary_id="ben_verified",
+            details_hash="callback-v2",
+            proposer=AP_CLERK,
+            failure_code="90701",
+            expires_at=None,
+            created_at=SEEN,
+        )
+    assert caught.value.code == "expiry"
+
+
+def test_another_invoices_approval_does_not_pay():
+    conn = connect()
+    obligation_id, _incident_id = _ready(conn)
+    other = conn.execute(
+        """
+        INSERT INTO obligation (invoice_ref, amount, currency, supplier_id, status, live_transfer_id)
+        SELECT 'INV-OTHER', amount, currency, supplier_id, status, live_transfer_id
+        FROM obligation WHERE id = ?
+        """,
+        (obligation_id,),
+    )
+    conn.execute(
+        "INSERT INTO incident (obligation_id, claim_json, state) VALUES (?, NULL, 'OPEN')",
+        (other.lastrowid,),
+    )
+    conn.commit()
+    other_incident = conn.execute(
+        "SELECT id FROM incident WHERE obligation_id = ?",
+        (other.lastrowid,),
+    ).fetchone()["id"]
+    theirs = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=other_incident,
+        obligation_id=int(other.lastrowid),
+        action="REPLACE_NEW_DETAILS",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_verified",
+        details_hash="callback-v2",
+        proposer=AP_CLERK,
+        failure_code="90701",
+        quote_id="quo_same",
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(
+        conn,
+        theirs.approval_id,
+        intent_terms(conn, theirs.id),
+        approver=FINANCE_APPROVER,
+        used_at=SEEN,
+    )
+    client = Pay()
+
+    with pytest.raises(ReplaceError) as caught:
+        replace_payment(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            attempt=1,
+            beneficiary_id="ben_verified",
+            details_hash="callback-v2",
+            transfer_method="SWIFT",
+            reason="other_services",
+            as_of=SEEN,
+            intent_id=theirs.id,
+            approval_id=theirs.approval_id,
+            quote_id="quo_same",
+        )
+
+    assert caught.value.code == "obligation"
+    assert client.created == []
+    state = conn.execute("SELECT state FROM execution_intent WHERE id = ?", (theirs.id,)).fetchone()
+    assert state["state"] == "proposed"
+
+
+def test_replaying_one_of_two_identical_intents_pays_once():
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    client = Pay()
+    first = _grant(conn, incident_id, quote_id="quo_same")
+    second = _grant(conn, incident_id, quote_id="quo_same")
+
+    paid = execute(conn, client, first.id, as_of=SEEN)
+    again = execute(conn, client, first.id, as_of=SEEN)
+
+    assert paid.remote_id == "awx-new"
+    assert again.remote_id == "awx-new"
+    assert len(client.created) == 1
+    with pytest.raises(ReplaceError) as caught:
+        replace_payment(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            attempt=1,
+            beneficiary_id="ben_verified",
+            details_hash="callback-v2",
+            transfer_method="SWIFT",
+            reason="other_services",
+            as_of=SEEN,
+            intent_id=second.id,
+            approval_id=second.approval_id,
+            quote_id="quo_same",
+        )
+    assert caught.value.code == "live"
+    assert len(client.created) == 1
+    stored = conn.execute("SELECT state FROM execution_intent WHERE id = ?", (second.id,)).fetchone()
+    assert stored["state"] == "proposed"
+
+
+def test_a_different_quote_does_not_spend_the_replacement_grant():
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    client = Pay()
+    ref = _grant(conn, incident_id, quote_id="quo_locked")
+
+    with pytest.raises(ReplaceError) as caught:
+        replace_payment(
+            conn,
+            client,
+            obligation_id=obligation_id,
+            attempt=1,
+            beneficiary_id="ben_verified",
+            details_hash="callback-v2",
+            transfer_method="SWIFT",
+            reason="other_services",
+            as_of=SEEN,
+            intent_id=ref.id,
+            approval_id=ref.approval_id,
+            quote_id="quo_other",
+        )
+
+    assert caught.value.code == "void"
+    assert client.created == []
+    paid = replace_payment(
+        conn,
+        client,
+        obligation_id=obligation_id,
+        attempt=1,
+        beneficiary_id="ben_verified",
+        details_hash="callback-v2",
+        transfer_method="SWIFT",
+        reason="other_services",
+        as_of=SEEN,
+        intent_id=ref.id,
+        approval_id=ref.approval_id,
+        quote_id="quo_locked",
+    )
+    assert paid == "awx-new"
+    assert len(client.created) == 1
+
+
+def test_a_changed_amount_at_execution_does_not_pay():
+    conn = connect()
+    _obligation_id, incident_id = _ready(conn)
+    client = Pay(amount="4300.00")
+    ref = _grant(conn, incident_id)
+
+    with pytest.raises(ReplaceError) as caught:
+        execute(conn, client, ref.id, as_of=SEEN)
+
+    assert caught.value.code == "void"
+    assert client.created == []
+
+
+def test_a_changed_beneficiary_at_execution_does_not_pay():
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    ref = _grant(conn, incident_id)
+    supplier_id = conn.execute(
+        "SELECT supplier_id FROM obligation WHERE id = ?",
+        (obligation_id,),
+    ).fetchone()["supplier_id"]
+    conn.execute(
+        """
+        INSERT INTO bank_detail_version (
+            supplier_id, beneficiary_id, details_hash, bank_name, account_last4, source,
+            verified_by, verified_at
+        ) VALUES (?, 'ben_other', 'callback-v3', 'Other Bank', '9999',
+                  'verified_callback', 'finance-approver', ?)
+        """,
+        (supplier_id, SEEN),
+    )
+    conn.commit()
+    client = Pay()
+
+    with pytest.raises(ReplaceError) as caught:
+        execute(conn, client, ref.id, as_of=SEEN)
+
+    assert caught.value.code == "void"
+    assert client.created == []
+
+
+def test_two_threads_execute_one_replacement(tmp_path):
+    import threading
+
+    path = tmp_path / "execute.db"
+    setup = connect(path)
+    migrate(setup)
+    _obligation_id, incident_id = _ready(setup)
+    ref = _grant(setup, incident_id)
+    setup.close()
+    client = Pay()
+    barrier = threading.Barrier(2)
+    found: list[str] = []
+
+    def worker() -> None:
+        local = connect(path)
+        try:
+            barrier.wait()
+            found.append(execute(local, client, ref.id, as_of=SEEN).remote_id)
+        finally:
+            local.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert found == ["awx-new", "awx-new"]
+    assert len(client.created) == 1
+
+
+def test_a_raw_beneficiary_intent_cannot_bypass_the_call_back():
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    ref = open_intent(
+        conn,
+        kind="beneficiary",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="NEW_BENEFICIARY",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="",
+        details_hash="not-a-callback",
+        proposer=AP_CLERK,
+        body_json='{"note": "called them"}',
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=SEEN,
+    )
+    client = Pay()
+
+    with pytest.raises(ExecuteError) as caught:
+        execute(conn, client, ref.id, as_of=SEEN)
+
+    assert caught.value.code == "callback"
+    assert client.beneficiaries == []
+
+
+class _FailingCommit:
+    def __init__(self, conn, *, fail_on: int) -> None:
+        self._conn = conn
+        self.fail_on = fail_on
+        self.commits = 0
+        self.armed = True
+
+    def commit(self) -> None:
+        self.commits += 1
+        if self.armed and self.commits == self.fail_on:
+            raise sqlite3.OperationalError("disk")
+        self._conn.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_beneficiary_create_recovers_after_the_local_write_fails():
+    from backend.airwallex.types import Beneficiary
+
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    client_setup = Pay()
+    body = {"beneficiary": {"bank_details": {"bank_name": "Deutsche Kreditbank"}}}
+    confirmation = CallbackConfirmation(
+        phone="+49-30-000000",
+        confirmed=True,
+        attested_by=FINANCE_APPROVER,
+        attested_at=SEEN,
+    )
+    card = verify_bank_change(
+        conn,
+        client_setup,
+        obligation_id=obligation_id,
+        incident_ref=str(incident_id),
+        bank_name="Deutsche Kreditbank",
+        account_last4="2051",
+        beneficiary=body,
+        confirmation=confirmation,
+    )
+    intent = _intent_id(conn)
+    approve(conn, card.approval_id, intent_terms(conn, intent), approver=FINANCE_APPROVER, used_at=SEEN)
+
+    class Desk:
+        def __init__(self) -> None:
+            self.created: list[dict] = []
+            self.saved: dict[str, str] = {}
+
+        def create_beneficiary(self, payload):
+            self.created.append(payload)
+            self.saved[payload["request_id"]] = "ben_crash"
+            return Beneficiary(id="ben_crash")
+
+        def find_beneficiary(self, request_id):
+            if request_id not in self.saved:
+                return None
+            return Beneficiary(id=self.saved[request_id])
+
+    desk = Desk()
+    proxy = _FailingCommit(conn, fail_on=2)
+    with pytest.raises(sqlite3.OperationalError):
+        execute(proxy, desk, intent, as_of=SEEN)
+    proxy.rollback()
+    proxy.armed = False
+
+    recovered = execute(proxy, desk, intent, as_of=SEEN)
+
+    assert recovered.remote_id == "ben_crash"
+    assert len(desk.created) == 1
+
+
+def test_a_beneficiary_whose_hash_does_not_match_its_payload_is_refused():
+    import json
+
+    conn = connect()
+    obligation_id, incident_id = _ready(conn)
+    payload = {
+        "body": {"beneficiary": {"bank_details": {"iban": "DE02120300000000202051"}}},
+        "bank_name": "Deutsche Kreditbank",
+        "account_last4": "2051",
+        "phone": "+49-30-000000",
+        "confirmed": True,
+        "attested_by": FINANCE_APPROVER,
+        "attested_at": SEEN,
+    }
+    ref = open_intent(
+        conn,
+        kind="beneficiary",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="NEW_BENEFICIARY",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="",
+        details_hash="not-the-payload",
+        proposer=AP_CLERK,
+        body_json=json.dumps(payload),
+        expires_at=EXPIRES,
+        created_at=SEEN,
+    )
+    approve(conn, ref.approval_id, intent_terms(conn, ref.id), approver=FINANCE_APPROVER, used_at=SEEN)
+    client = Pay()
+
+    with pytest.raises(ExecuteError) as caught:
+        execute(conn, client, ref.id, as_of=SEEN)
+
+    assert caught.value.code == "void"
+    assert client.beneficiaries == []

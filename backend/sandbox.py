@@ -1,7 +1,14 @@
-"""Sandbox driver. This is the only place that calls Airwallex simulation."""
+"""Sandbox driver. This is the only place that calls Airwallex simulation.
+
+`prove_account_closed_return` creates a transfer, and `_live_contract` creates a
+beneficiary, only so the contract script can manufacture a failed payout. Those
+two calls are not a payment path and they do not approve anything. They raise
+unless the caller is `backend.scripts.sandbox_contract`.
+"""
 
 from __future__ import annotations
 
+import inspect
 import urllib.parse
 import uuid
 from collections.abc import Callable
@@ -65,6 +72,23 @@ _SENT_PAGE_SIZE = 10
 _SENT_PAGE_LIMIT = 5
 
 
+class SandboxContractError(Exception):
+    """A contract-only Airwallex create was called from outside the contract script."""
+
+    def __init__(self) -> None:
+        super().__init__("contract_script")
+
+
+def _require_contract_script() -> None:
+    for frame in inspect.stack():
+        name = frame.frame.f_globals.get("__name__", "")
+        if name == "backend.scripts.sandbox_contract":
+            return
+        if frame.filename.replace("\\", "/").endswith("backend/scripts/sandbox_contract.py"):
+            return
+    raise SandboxContractError()
+
+
 class SandboxDriver:
     def __init__(self, client, *, sleep: Sleeper | None = None, attempts: int = 8) -> None:
         self._client = client
@@ -123,6 +147,7 @@ class SandboxDriver:
         reason: str,
         request_id: str,
     ) -> ContractResult:
+        _require_contract_script()
         created = self._client.create_transfer(
             transfer_amount=transfer_amount,
             transfer_currency=transfer_currency,
@@ -216,6 +241,7 @@ def run_contract_cli() -> int:
 
 
 def _live_contract() -> ContractResult:
+    _require_contract_script()
     client = AirwallexClient.from_env()
     validation = client.validate_beneficiary(CONTRACT_BENEFICIARY)
     print("validate_beneficiary", "pass" if validation.ok else "fail")

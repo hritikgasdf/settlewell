@@ -159,7 +159,10 @@ CREATE TABLE IF NOT EXISTS execution_intent (
     state TEXT NOT NULL CHECK (state IN ('proposed', 'executed', 'refused')),
     approval_id INTEGER,
     expires_at TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    remote_id TEXT,
+    remote_status TEXT,
+    request_id TEXT
 );
 """
 
@@ -206,6 +209,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(approval)")}
     if "proposer" not in columns:
         conn.execute("ALTER TABLE approval ADD COLUMN proposer TEXT")
+    intent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(execution_intent)")}
+    for name in ("remote_id", "remote_status", "request_id"):
+        if intent_columns and name not in intent_columns:
+            conn.execute(f"ALTER TABLE execution_intent ADD COLUMN {name} TEXT")
     conn.commit()
 
 

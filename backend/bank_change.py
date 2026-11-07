@@ -6,9 +6,16 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from backend.approvals import AP_CLERK, ApprovalTerms, binding_hash, propose
-from backend.execute import CallbackConfirmation, ExecuteError, callback_ok, open_intent
+from backend.execute import (
+    CallbackConfirmation,
+    ExecuteError,
+    callback_ok,
+    normalize_timestamp,
+    open_intent,
+)
 from backend.ledger import append_audit, append_bank_detail_version
 
 _IBAN_CODE = "083"
@@ -53,7 +60,7 @@ def verify_bank_change(
         (obligation["supplier_id"],),
     ).fetchone()
     body = _without_id(beneficiary)
-    digest = _details_hash(bank_name, account_last4, body)
+    digest = beneficiary_details_hash(bank_name, account_last4, body)
     current = _verified(conn, obligation["supplier_id"], digest)
     if current is None:
         _remember_claim(conn, obligation["supplier_id"], digest, bank_name, account_last4)
@@ -69,6 +76,7 @@ def verify_bank_change(
         except ExecuteError as error:
             raise BankChangeError(error.code) from error
         text = _diff(conn, obligation["supplier_id"], 0, bank_name, account_last4)
+        opened = datetime.fromisoformat(normalize_timestamp(confirmation.attested_at))
         intent = open_intent(
             conn,
             kind="beneficiary",
@@ -83,11 +91,15 @@ def verify_bank_change(
             body_json=json.dumps(
                 {
                     "body": body,
-                    "attested_by": confirmation.attested_by,
                     "bank_name": bank_name,
                     "account_last4": account_last4,
+                    "phone": confirmation.phone,
+                    "confirmed": confirmation.confirmed,
+                    "attested_by": confirmation.attested_by,
+                    "attested_at": confirmation.attested_at,
                 }
             ),
+            expires_at=(opened + timedelta(hours=24)).isoformat(),
             created_at=confirmation.attested_at,
         )
         append_audit(
@@ -122,7 +134,7 @@ def _without_id(beneficiary: Mapping) -> dict:
     return {key: value for key, value in beneficiary.items() if key != "id"}
 
 
-def _details_hash(bank_name: str, account_last4: str, body: Mapping) -> str:
+def beneficiary_details_hash(bank_name: str, account_last4: str, body: Mapping) -> str:
     payload = {"account_last4": account_last4, "bank_name": bank_name, "beneficiary": body}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()

@@ -9,27 +9,14 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from backend.airwallex.types import BalanceHistoryItem, BalanceHistoryPage, Transfer, TransferPage
-from backend.approvals import (
-    AP_CLERK,
-    FINANCE_APPROVER,
-    ApprovalError,
-    ApprovalTerms,
-    approve,
-    propose,
-)
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalError, approve
+from backend.execute import ExecuteError, execute, intent_terms, open_intent
 from backend.ledger import append_bank_detail_version, connect, migrate
 from backend.proof import issue_proof
-from backend.replacement_tool import ReplaceError, propose_replacement
+from backend.replacement_tool import ReplaceError
 
 _STATUSES = ("SCHEDULED", "PROCESSING", "SENT", "PAID", "FAILED", "CANCELLED")
 _LIVE = frozenset({"SCHEDULED", "PROCESSING", "SENT", "PAID", "OVERDUE"})
-_TERMS = ApprovalTerms(
-    action="REPLACE",
-    amount="100.00",
-    currency="EUR",
-    beneficiary_id="ben_example",
-    details_hash="details-v1",
-)
 _SECRET = "property-secret"
 _NOW = 1_700_000_000_000
 
@@ -81,7 +68,23 @@ class _World:
             (self.obligation_id,),
         )
         self.incident_id = int(incident.lastrowid)
-        self.approval_id = propose(self.conn, self.incident_id, _TERMS, proposer=AP_CLERK)
+        opened = open_intent(
+            self.conn,
+            kind="replacement",
+            incident_id=self.incident_id,
+            obligation_id=self.obligation_id,
+            action="REPLACE_SAME",
+            amount="100.00",
+            currency="EUR",
+            beneficiary_id="ben_example",
+            details_hash="details-v1",
+            proposer=AP_CLERK,
+            failure_code="90802",
+            expires_at="2026-11-04T12:00:00+00:00",
+            created_at="2026-11-03T12:00:00+00:00",
+        )
+        self.intent_id = opened.id
+        self.approval_id = opened.approval_id
         self.client = _Client()
         self.events = 0
         self.last: tuple[bytes, str, str] | None = None
@@ -117,7 +120,7 @@ class _World:
             approve(
                 self.conn,
                 self.approval_id,
-                _TERMS,
+                intent_terms(self.conn, self.intent_id),
                 approver=approver,
                 used_at="2026-11-03T12:05:00+00:00",
             )
@@ -132,13 +135,8 @@ class _World:
         if approval["used_at"] is None or approval["approver"] == approval["proposer"]:
             return
         try:
-            propose_replacement(
-                self.conn,
-                self.client,
-                obligation_id=self.obligation_id,
-                incident_ref=str(self.incident_id),
-            )
-        except ReplaceError:
+            execute(self.conn, self.client, self.intent_id, as_of="2026-11-03T12:10:00+00:00")
+        except (ReplaceError, ExecuteError):
             return
 
     def _event(self, status: str, *, replay: bool) -> None:
@@ -196,6 +194,7 @@ class _Client:
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=Decimal(0),
+            failure_reason="90802: Beneficiary bank returned",
             reference="INV-3300",
         )
 

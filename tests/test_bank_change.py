@@ -230,7 +230,9 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
     assert created.remote_id == "ben_dkb"
     assert again.beneficiary_id == "ben_dkb"
     sent = {key: value for key, value in NEW_BANK.items() if key != "id"}
-    assert client.created == [sent]
+    assert client.created[0]["request_id"].startswith("stl-ben-")
+    body = {key: value for key, value in client.created[0].items() if key != "request_id"}
+    assert body == sent
     assert client.updated == []
     version = conn.execute(
         """
@@ -267,6 +269,7 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
         details_hash=version["details_hash"],
         proposer=AP_CLERK,
         failure_code="90802",
+        expires_at="2026-11-04T12:00:00+00:00",
         created_at="2026-11-03T12:00:00+00:00",
     )
     approve(
@@ -277,7 +280,12 @@ def test_verified_change_shows_commerzbank_to_dkb_and_binds_the_hash():
         used_at="2026-11-03T12:10:00+00:00",
     )
     paid = propose_replacement(
-        conn, client, obligation_id=obligation_id, incident_ref=incident_ref
+        conn,
+        client,
+        obligation_id=obligation_id,
+        incident_ref=incident_ref,
+        intent_id=pay_intent.id,
+        as_of="2026-11-03T12:10:00+00:00",
     )
     assert paid == "awx-new"
     assert client.paid[0]["beneficiary_id"] == "ben_dkb"
