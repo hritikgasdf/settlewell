@@ -13,7 +13,7 @@ from backend.fx_funding import (
     fund_replacement,
     reserve_floor,
 )
-from backend.ledger import LedgerError, connect, consume_fx_quote, seed_hero
+from backend.ledger import connect, seed_hero
 
 AS_OF = "2026-11-03T12:00:00+00:00"
 
@@ -95,10 +95,11 @@ def test_eur_under_the_floor_converts_usd_within_the_limit():
 
     result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
 
-    assert result.action == "converted"
+    assert result.action == "locked"
     assert result.quote_id == "quo_hero"
-    assert result.conversion_id == "con_hero"
+    assert result.conversion_id is None
     assert result.buy_amount == shortfall
+    assert book.conversions == []
     assert book.quotes == [
         {
             "buy_currency": "EUR",
@@ -107,13 +108,8 @@ def test_eur_under_the_floor_converts_usd_within_the_limit():
             "buy_amount": shortfall,
         }
     ]
-    assert book.conversions[0]["quote_id"] == "quo_hero"
-    assert book.conversions[0]["buy_currency"] == "EUR"
-    assert book.conversions[0]["sell_currency"] == "USD"
-    assert book.conversions[0]["buy_amount"] == shortfall
-    quote = conn.execute("SELECT state, consumed_by, pair FROM fx_quote").fetchone()
-    assert quote["state"] == "CONSUMED"
-    assert quote["consumed_by"] == "con_hero"
+    quote = conn.execute("SELECT state, pair FROM fx_quote").fetchone()
+    assert quote["state"] == "LOCKED"
     assert quote["pair"] == "USD/EUR"
     snapshots = conn.execute(
         "SELECT currency, available, label FROM balance_snapshot ORDER BY id"
@@ -121,11 +117,8 @@ def test_eur_under_the_floor_converts_usd_within_the_limit():
     assert [(row["currency"], row["label"]) for row in snapshots] == [
         ("EUR", "before"),
         ("USD", "before"),
-        ("EUR", "after"),
-        ("USD", "after"),
     ]
     assert snapshots[0]["available"] == "800.00"
-    assert snapshots[2]["available"] == str(Decimal("800.00") + shortfall)
 
 
 def test_a_top_up_over_the_limit_escalates_without_a_conversion():
@@ -187,11 +180,8 @@ def test_a_demo_floor_above_the_balance_converts_once_under_the_limit(monkeypatc
 
     result = fund_replacement(conn, book, obligation_id=obligation_id, as_of=AS_OF)
 
-    assert result.action == "converted"
+    assert result.action == "locked"
     assert result.buy_amount == shortfall
-    assert len(book.conversions) == 1
-    stored = conn.execute("SELECT state, consumed_by FROM fx_quote").fetchone()
-    assert stored["state"] == "CONSUMED"
-    assert stored["consumed_by"] == "con_hero"
-    with pytest.raises(LedgerError):
-        consume_fx_quote(conn, result.quote_id, "again")
+    assert book.conversions == []
+    stored = conn.execute("SELECT state FROM fx_quote").fetchone()
+    assert stored["state"] == "LOCKED"

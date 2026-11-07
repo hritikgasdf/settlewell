@@ -31,12 +31,26 @@ def stop_duplicate(conn, client, *, approval_id: int, transfer_record_id: int) -
     if approval["used_at"] is None or approval["action"] != "STOP_DUPLICATE":
         raise StopDuplicateError("not_approved")
     remote = client.get_transfer(record["airwallex_id"])
-    terms = _terms(record, remote.beneficiary_id)
+    terms = _terms(conn, record, remote.beneficiary_id, transfer_record_id)
     if binding_hash(terms) != approval["binding_hash"]:
         raise StopDuplicateError("void")
     if remote.status != "SCHEDULED":
         _remember(conn, transfer_record_id, remote)
         return StopResult(False, remote.status, True)
+    from backend.execute import ExecuteError, claim
+
+    try:
+        claim(
+            conn,
+            kind="cancel",
+            amount=str(record["amount"]),
+            currency=str(record["currency"]),
+            beneficiary_id=remote.beneficiary_id or "",
+            details_hash=record["details_hash"] or "",
+            target_id=str(transfer_record_id),
+        )
+    except ExecuteError as error:
+        raise StopDuplicateError(error.code) from error
     try:
         client.cancel_transfer(remote.id)
     except AirwallexError as error:
@@ -50,13 +64,23 @@ def stop_duplicate(conn, client, *, approval_id: int, transfer_record_id: int) -
     return StopResult(again.status == "CANCELLED", again.status, False)
 
 
-def _terms(record, beneficiary_id: str | None) -> ApprovalTerms:
+def _terms(conn, record, beneficiary_id: str | None, transfer_record_id: int) -> ApprovalTerms:
+    intent = conn.execute(
+        """
+        SELECT id FROM execution_intent
+        WHERE kind = 'cancel' AND target_id = ? AND state = 'proposed'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (str(transfer_record_id),),
+    ).fetchone()
+    evidence = (f"intent:{intent['id']}",) if intent else ()
     return ApprovalTerms(
         action="STOP_DUPLICATE",
         amount=str(record["amount"]),
         currency=str(record["currency"]),
         beneficiary_id=beneficiary_id or "",
         details_hash=record["details_hash"] or "",
+        evidence_hashes=evidence,
     )
 
 

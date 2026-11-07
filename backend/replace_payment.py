@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from backend.airwallex.client import AirwallexError
 from backend.ledger import set_obligation_status
+from backend.policy import Action, code_from_reason, decide
 
 _DEFINITIVE_REFUSAL = frozenset(
     {"insufficient_funds", "validation_failed", "amount_above_limit", "limit_exceeded"}
@@ -67,6 +68,22 @@ def replace_payment(
             raise ReplaceError("live")
         amount = transfer_amount if transfer_amount is not None else Decimal(obligation["amount"])
         currency = transfer_currency or obligation["currency"]
+        _refuse_unless_replaceable(conn, client, obligation)
+        from backend.execute import ExecuteError, claim
+
+        try:
+            claim(
+                conn,
+                kind="replacement",
+                amount=format(amount, "f"),
+                currency=currency,
+                beneficiary_id=beneficiary_id,
+                details_hash=details_hash,
+                as_of=as_of,
+            )
+        except ExecuteError as error:
+            conn.rollback()
+            raise ReplaceError(error.code) from error
         remote = _create_or_find(
             client,
             obligation,
@@ -110,6 +127,27 @@ def replace_payment(
         conn.commit()
         raise ReplaceError("person")
     return str(remote.id)
+
+
+def _refuse_unless_replaceable(conn, client, obligation) -> None:
+    """A recall or any non-replace code never creates a payout, even with a grant."""
+    live_id = obligation["live_transfer_id"]
+    original = None
+    if live_id is not None:
+        original = conn.execute(
+            "SELECT airwallex_id FROM transfer_record WHERE id = ?",
+            (live_id,),
+        ).fetchone()
+    if original is None or not original["airwallex_id"]:
+        raise ReplaceError("policy")
+    remote = client.get_transfer(original["airwallex_id"])
+    decision = decide(
+        remote.status,
+        failure_code=code_from_reason(remote.failure_reason),
+        claim="where",
+    )
+    if decision.action not in {Action.REPLACE_SAME, Action.REPLACE_NEW_DETAILS}:
+        raise ReplaceError("policy")
 
 
 def _create_or_find(

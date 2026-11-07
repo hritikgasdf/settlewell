@@ -8,6 +8,8 @@ import pytest
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import Conversion, FxQuote
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalError, ApprovalTerms, binding_hash
+from backend.approvals import approve as approve_grant
+from backend.execute import intent_terms, open_intent
 from backend.fx_quote import FxQuoteError, approve_fx_quote, execute_fx_quote, propose_fx_quote
 from backend.ledger import LedgerError, connect, consume_fx_quote, lock_fx_quote, migrate, seed_hero
 
@@ -69,6 +71,27 @@ def _proposed(conn, valid_to: str = VALID):
     )
     terms = _terms()
     approval_id = propose_fx_quote(conn, incident_id, terms, proposer=AP_CLERK)
+    ref = open_intent(
+        conn,
+        kind="fx_conversion",
+        incident_id=incident_id,
+        obligation_id=conn.execute("SELECT id FROM obligation").fetchone()["id"],
+        action="FX_FUND",
+        amount="4400.00",
+        currency="EUR",
+        beneficiary_id="ben_dkb",
+        details_hash="hash-dkb",
+        proposer=AP_CLERK,
+        quote_id="quo_1",
+        created_at=USED,
+    )
+    approve_grant(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=USED,
+    )
     return terms, approval_id
 
 

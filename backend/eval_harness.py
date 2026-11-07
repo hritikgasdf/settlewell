@@ -290,8 +290,37 @@ def _webhook_replay() -> tuple[str, str, bool, bool]:
     return "ERROR", "R-ERROR", False, False
 
 
+def _grant_replacement(conn, incident_id: int) -> None:
+    from backend.execute import intent_terms, open_intent
+
+    obligation_id = _obligation_id(conn, incident_id)
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="100.00",
+        currency="EUR",
+        beneficiary_id="ben_example",
+        details_hash="details-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
+
+
 def _replace_once() -> tuple[str, str, bool, bool]:
-    conn, obligation_id = _books("INV-1013")
+    conn, incident_id = _books("INV-1013")
+    obligation_id = _obligation_id(conn, incident_id)
+    _grant_replacement(conn, incident_id)
     client = _Pay()
     first = replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **_REPLACE)
     second = replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **_REPLACE)
@@ -301,7 +330,9 @@ def _replace_once() -> tuple[str, str, bool, bool]:
 
 
 def _replace_unknown() -> tuple[str, str, bool, bool]:
-    conn, obligation_id = _books("INV-1014")
+    conn, incident_id = _books("INV-1014")
+    obligation_id = _obligation_id(conn, incident_id)
+    _grant_replacement(conn, incident_id)
     client = _Pay(timeout=True)
     try:
         replace_payment(conn, client, obligation_id=obligation_id, attempt=1, **_REPLACE)
@@ -342,6 +373,7 @@ class _Pay:
             transfer_currency="EUR",
             transfer_method="SWIFT",
             fee_amount=self.fee_amount,
+            failure_reason="90802: Beneficiary bank returned",
             reference="INV",
         )
 

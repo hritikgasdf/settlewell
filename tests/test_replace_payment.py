@@ -7,8 +7,12 @@ import pytest
 
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import Transfer, TransferPage
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
+from backend.execute import intent_terms, open_intent
 from backend.ledger import connect, seed_hero
 from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
+
+_SEEN = "2026-11-03T12:00:00+00:00"
 
 
 def _transfer(transfer_id: str, request_id: str) -> Transfer:
@@ -28,6 +32,17 @@ class Api:
         self.mode = "ok"
         self.found = _transfer("awx-existing", "stl-inv2291-1")
         self.last: dict = {}
+        self.failure_reason = "90802: Beneficiary bank returned"
+
+    def get_transfer(self, transfer_id: str) -> Transfer:
+        return Transfer(
+            id=transfer_id,
+            status="CANCELLED",
+            transfer_amount=Decimal("4200.00"),
+            transfer_currency="EUR",
+            failure_reason=self.failure_reason,
+            reference="INV-2291",
+        )
 
     def create_transfer(self, **kwargs):
         request_id = kwargs["request_id"]
@@ -53,7 +68,37 @@ def _obligation(conn):
         "UPDATE transfer_record SET status = 'CANCELLED', request_id = 'original-payment'"
     )
     conn.commit()
-    return conn.execute("SELECT id FROM obligation").fetchone()["id"]
+    obligation_id = conn.execute("SELECT id FROM obligation").fetchone()["id"]
+    _grant(conn, obligation_id)
+    return obligation_id
+
+
+def _grant(conn, obligation_id: int) -> None:
+    incident_id = conn.execute(
+        "SELECT id FROM incident WHERE obligation_id = ?",
+        (obligation_id,),
+    ).fetchone()["id"]
+    ref = open_intent(
+        conn,
+        kind="replacement",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
+        action="REPLACE_SAME",
+        amount="4200.00",
+        currency="EUR",
+        beneficiary_id="ben_1",
+        details_hash="onboarding-v1",
+        proposer=AP_CLERK,
+        failure_code="90802",
+        created_at=_SEEN,
+    )
+    approve(
+        conn,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
+        approver=FINANCE_APPROVER,
+        used_at=_SEEN,
+    )
 
 
 _ARGS = {
@@ -68,6 +113,19 @@ def test_request_id_is_deterministic_and_within_bounds():
     request_id = replacement_request_id("INV-2291", 2)
     assert request_id == "stl-inv2291-2"
     assert 10 <= len(request_id) <= 50
+
+
+def test_a_recall_does_not_pay_even_with_a_replacement_grant():
+    conn = connect()
+    obligation_id = _obligation(conn)
+    api = Api()
+    api.failure_reason = "91001: Recall requested"
+
+    with pytest.raises(ReplaceError) as caught:
+        replace_payment(conn, api, obligation_id=obligation_id, attempt=1, **_ARGS)
+
+    assert caught.value.code == "policy"
+    assert api.created == []
 
 
 def test_duplicate_request_id_returns_the_transfer_from_the_lookup():
@@ -203,6 +261,7 @@ def test_a_definitive_refusal_allows_the_next_attempt_until_three():
     api = Api()
     api.mode = "refused"
     for attempt in (1, 2, 3):
+        _grant(conn, obligation_id)
         with pytest.raises(ReplaceError) as caught:
             replace_payment(conn, api, obligation_id=obligation_id, attempt=attempt, **_ARGS)
         assert caught.value.code == "refused"

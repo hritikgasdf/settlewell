@@ -4,7 +4,8 @@ import pytest
 
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import CancelResult, Transfer
-from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalTerms, approve, propose
+from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
+from backend.execute import intent_terms, open_intent
 from backend.ledger import connect, insert_external_transfer, seed_hero
 from backend.stop_duplicate import StopDuplicateError, stop_duplicate
 
@@ -54,22 +55,28 @@ def _ready(conn):
         ("colleague-v1", inserted),
     )
     conn.commit()
-    terms = ApprovalTerms(
+    ref = open_intent(
+        conn,
+        kind="cancel",
+        incident_id=incident_id,
+        obligation_id=obligation_id,
         action="STOP_DUPLICATE",
         amount="4200.00",
         currency="EUR",
         beneficiary_id="ben_colleague",
         details_hash="colleague-v1",
+        proposer=AP_CLERK,
+        target_id=str(inserted),
+        created_at="2026-11-03T12:00:00+00:00",
     )
-    approval_id = propose(conn, incident_id, terms, proposer=AP_CLERK)
     approve(
         conn,
-        approval_id,
-        terms,
+        ref.approval_id,
+        intent_terms(conn, ref.id),
         approver=FINANCE_APPROVER,
         used_at="2026-11-03T12:00:00+00:00",
     )
-    return approval_id, inserted
+    return ref.approval_id, inserted
 
 
 def test_an_approved_scheduled_duplicate_cancels_with_no_ledger_impact():

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from backend.airwallex.types import BalanceHistoryPage
+from backend.policy import Action, code_from_reason, decide
 from backend.repaid import colleague_repaid
 from backend.replace_payment import ReplaceError, replace_payment, replacement_request_id
 
@@ -70,6 +71,13 @@ def propose_replacement(conn, client, *, obligation_id: int, incident_ref: str) 
     ).fetchone()
     if version is None:
         raise ReplaceError("unverified")
+    decision = decide(
+        remote.status,
+        failure_code=code_from_reason(remote.failure_reason),
+        claim="where",
+    )
+    if decision.action not in {Action.REPLACE_SAME, Action.REPLACE_NEW_DETAILS}:
+        raise ReplaceError("policy")
     return replace_payment(
         conn,
         client,

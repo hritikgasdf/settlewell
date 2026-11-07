@@ -86,6 +86,21 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
     quote = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
     sell, buy = quote["pair"].split("/")
     quote_id = str(terms.quote_id)
+    from backend.execute import ExecuteError, claim
+
+    try:
+        claim(
+            conn,
+            kind="fx_conversion",
+            amount=quote["amount"],
+            currency=buy,
+            beneficiary_id=terms.beneficiary_id,
+            details_hash=terms.details_hash,
+            quote_id=quote_id,
+            as_of=as_of,
+        )
+    except ExecuteError as error:
+        raise FxQuoteError(error.code) from error
     try:
         consume_fx_quote(conn, quote_id, "")
     except LedgerError:
@@ -106,6 +121,12 @@ def execute_fx_quote(conn, client, approval_id: int, terms: ApprovalTerms, *, as
             return _requote(conn, client, terms, incident_id=row["incident_id"], proposer=row["proposer"])
         raise
     record_fx_conversion(conn, quote_id, conversion.conversion_id)
+    if hasattr(client, "current_balances"):
+        from backend.fx_funding import _available, _snapshot
+
+        after = client.current_balances()
+        _snapshot(conn, "EUR", _available(after, "EUR"), as_of, "after")
+        _snapshot(conn, "USD", _available(after, "USD"), as_of, "after")
     conn.commit()
     return FxDecision("converted", str(terms.quote_id), approval_id, conversion.conversion_id)
 
