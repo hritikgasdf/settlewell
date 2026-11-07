@@ -59,6 +59,37 @@ That prints one line per incident and then `30/30`. Without `SETTLEWELL_MOCK=1` 
 
 Copy `.env.example` to `.env` if you want a local note of the variable names. The process reads the environment itself. `.env` is gitignored. Put values only in the environment, never in the repo. The mock console and the eval do not need those variables.
 
+## Local demo API (MOCK only)
+
+`uv run python -m backend.api` serves a JSON API on 127.0.0.1:8765 over a persisted SQLite demo DB (`var/settlewell.db`, seeded once). Approve, reject and cancel all run through `backend.execute`. Writes need a loopback Host, an allowed Origin and the CSRF token from `GET /api/session`, and work only in MOCK mode. There is no production authentication. Contract: `settlewell-ctx/p15-api-contract.md`.
+
+## Operator console (frontend, MOCK only)
+
+A React + Vite + TypeScript console in `frontend/`. It shows incidents, payments, bank versions, funding, proposals and audit, and can approve or reject proposals and cancel a scheduled duplicate payment. It talks only to the local demo API.
+
+Requirements: Node.js 20 or newer (Vite 6) and npm. The backend must be running.
+
+```
+# terminal 1, repo root
+uv run python -m backend.api
+
+# terminal 2
+cd frontend
+npm ci
+npm run dev        # http://127.0.0.1:5173 (proxies /api to 127.0.0.1:8765)
+```
+
+Build check and production-style preview:
+
+```
+cd frontend
+npm ci
+npm run build      # tsc --noEmit, then vite build into frontend/dist
+npm run preview    # serves frontend/dist on 127.0.0.1:5173; the backend must still be running
+```
+
+Limits: this is a local demo. The console has no login, and writes are accepted only when the backend runs in MOCK mode with an allowed Origin and the per-process CSRF token. The seeded demo is a `STOP_DUPLICATE` cancel, not a replacement. Proof PDFs are not available in this build. The seeded claim is absent. Only the cancel path is exercised end to end. To reset the demo, stop the backend and delete `var/settlewell.db`. Details: `settlewell-ctx/p15-ui-completion.md`.
+
 ## No-LLM baseline
 
 Without the policy engine, every supplier email is handed to a person. That baseline is **ESCALATE** on all 30 incidents. It is a static table, not a second model and not a dashboard. Settlewell's column is what the offline harness expects.
