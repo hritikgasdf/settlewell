@@ -114,7 +114,28 @@ CREATE TABLE IF NOT EXISTS balance_snapshot (
     currency TEXT NOT NULL,
     available TEXT NOT NULL,
     taken_at TEXT NOT NULL,
-    label TEXT NOT NULL
+    label TEXT NOT NULL,
+    request_id TEXT
+);
+CREATE TABLE IF NOT EXISTS payout_funding (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    intent_id INTEGER NOT NULL,
+    incident_id INTEGER,
+    obligation_id INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    fee_budget TEXT NOT NULL,
+    fee_currency TEXT NOT NULL,
+    fee_source TEXT NOT NULL,
+    reserve_floor TEXT NOT NULL,
+    available_before TEXT NOT NULL,
+    actual_fee TEXT,
+    actual_fee_currency TEXT,
+    state TEXT NOT NULL CHECK (state IN ('PREFLIGHT', 'ACCEPTED', 'REFUSED')),
+    hold_state TEXT NOT NULL CHECK (hold_state IN ('HELD', 'RELEASED')),
+    after_state TEXT NOT NULL CHECK (after_state IN ('PENDING', 'MISSING', 'OBSERVED')),
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS audit_event (
     id INTEGER PRIMARY KEY,
@@ -184,6 +205,7 @@ MODEL_TABLES = frozenset(
         "webhook_event",
         "fx_quote",
         "balance_snapshot",
+        "payout_funding",
         "audit_event",
         "eval_case",
         "eval_run",
@@ -213,6 +235,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     for name in ("remote_id", "remote_status", "request_id"):
         if intent_columns and name not in intent_columns:
             conn.execute(f"ALTER TABLE execution_intent ADD COLUMN {name} TEXT")
+    snapshot_columns = {row["name"] for row in conn.execute("PRAGMA table_info(balance_snapshot)")}
+    if "request_id" not in snapshot_columns:
+        conn.execute("ALTER TABLE balance_snapshot ADD COLUMN request_id TEXT")
     conn.commit()
 
 

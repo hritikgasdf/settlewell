@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from backend.airwallex.client import AirwallexError
-from backend.airwallex.types import Transfer, TransferPage
+from backend.airwallex.types import BalanceHistoryItem, BalanceHistoryPage, Transfer, TransferPage
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
 from backend.execute import intent_terms, open_intent
 from backend.ledger import connect, seed_hero
@@ -22,6 +22,7 @@ def _transfer(transfer_id: str, request_id: str) -> Transfer:
         request_id=request_id,
         transfer_amount=Decimal("4200.00"),
         transfer_currency="EUR",
+        beneficiary_id="ben_1",
         reference="INV-2291",
     )
 
@@ -40,9 +41,41 @@ class Api:
             status="CANCELLED",
             transfer_amount=Decimal("4200.00"),
             transfer_currency="EUR",
+            fee_amount=Decimal("13.47"),
+            fee_currency="EUR",
             failure_reason=self.failure_reason,
             reference="INV-2291",
         )
+
+    def balance_history(self, **_kwargs) -> BalanceHistoryPage:
+        return BalanceHistoryPage(
+            items=(
+                BalanceHistoryItem(
+                    id="rev",
+                    source="synthetic-inv-2291",
+                    amount=Decimal("4200.00"),
+                    currency="EUR",
+                    balance=None,
+                    description=None,
+                    fee=Decimal(0),
+                    posted_at=None,
+                    source_type="PAYOUT",
+                    transaction_type="PAYOUT_REVERSAL",
+                    account_type=None,
+                    reference="INV-2291",
+                ),
+            ),
+            has_more=False,
+            page_after=None,
+        )
+
+    def current_balances(self):
+        from backend.airwallex.types import Balance
+
+        return [
+            Balance("EUR", Decimal("100000.00"), Decimal(0), Decimal(0), Decimal("100000.00"), Decimal(0), account_type="cash"),
+            Balance("USD", Decimal("100000.00"), Decimal(0), Decimal(0), Decimal("100000.00"), Decimal(0), account_type="cash"),
+        ]
 
     def create_transfer(self, **kwargs):
         request_id = kwargs["request_id"]

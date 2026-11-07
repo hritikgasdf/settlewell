@@ -15,11 +15,21 @@ from backend.ledger import (
     set_obligation_status,
     set_transfer_status,
 )
-from backend.outcomes import NOT_PAID_STATUSES, Outcome, decide_set, outcome_kind, reversal_for
+from backend.outcomes import (
+    NOT_PAID_STATUSES,
+    HistoryError,
+    Outcome,
+    decide_set,
+    full_refund,
+    outcome_kind,
+    refund_currency,
+    refund_principal,
+    reversals_for,
+)
 from backend.paid_once import find_matches
 from backend.replace_payment import ReplaceError, _lookup_optional, _require_owner, _store
 
-_LOOKUP_ERRORS = (AirwallexError, TimeoutError, OSError, ReplaceError)
+_LOOKUP_ERRORS = (HistoryError, AirwallexError, TimeoutError, OSError, ReplaceError)
 
 
 def poll_incident(conn, client, incident_id: int, *, seen_at: str) -> list[dict]:
@@ -255,6 +265,13 @@ def _recover_one(conn, client, incident_id: int, obligation, row, seen_at: str) 
         return _mismatch(conn, incident_id, request_id, error.code, seen_at)
     _store(conn, obligation, remote, request_id=request_id, details_hash=details_hash, amount=amount, currency=currency)
     remember_remote(conn, intent["id"], str(remote.id), remote.status)
+    conn.commit()  # the accepted id is durable before the funding hooks run
+    from backend.funding import record_recovered
+
+    try:
+        record_recovered(conn, client, int(intent["id"]), remote, seen_at)
+    except ReplaceError:
+        return _mismatch(conn, incident_id, request_id, "funding", seen_at)
     return True
 
 
@@ -267,17 +284,26 @@ def _read_outcome(conn, client, incident_id, obligation, row, versions, is_origi
     """Refresh one known payment by id. Returns (Outcome, readable). Unreadable falls back to stored facts."""
     transfer_id = row["airwallex_id"]
     stored = row["status"]
-    remote = reversal = None
+    remote = reversals = refund = None
     readable = True
     try:
         remote = client.get_transfer(transfer_id)
-        reversal = reversal_for(client, transfer_id, remote.transfer_currency or row["currency"])
+        reversals = reversals_for(client, transfer_id, refund_currency(remote, row["currency"]))
+        refund = full_refund(remote, reversals)
     except _LOOKUP_ERRORS:
         readable = False
         _audit_once(conn, incident_id, "outcome_lookup_failed", transfer_id, seen_at)
-    if reversal is not None:
+    for reversal in reversals or ():
         _note_reversal(conn, incident_id, reversal, seen_at)
-    seen, amount = _remembered_reversal(conn, incident_id, transfer_id)
+    principal = refund_principal(remote) if remote is not None else None
+    if refund is not None:
+        _audit_once(conn, incident_id, "refund_verified", _refund_detail(transfer_id, principal), seen_at)
+        refunded = True
+    elif reversals:
+        refunded = False  # fresh data contradicts: partial, wrong currency, pending or ambiguous
+    else:  # no fresh evidence (transport failure or not in history): keep only a bound earlier verification
+        refunded = _refund_remembered(conn, incident_id, transfer_id, remote, principal)
+    seen, _amount = _remembered_reversal(conn, incident_id, transfer_id)
     status = stored
     if remote is not None:
         if stored in NOT_PAID_STATUSES and remote.status not in NOT_PAID_STATUSES:
@@ -311,11 +337,28 @@ def _read_outcome(conn, client, incident_id, obligation, row, versions, is_origi
         "original" if is_original else "replacement",
         status,
         reversed=seen,
-        returned=is_original and status == "CANCELLED" and amount is not None and amount != 0,
+        returned=is_original and status == "CANCELLED" and refunded,
         credited=credited,
         fresh=remote is not None,
     )
     return outcome, readable
+
+
+def _refund_detail(transfer_id: str, principal) -> str:
+    amount, currency = principal
+    return f"source={transfer_id} amount={format(amount.normalize(), 'f')} currency={currency}"
+
+
+def _refund_remembered(conn, incident_id: int, transfer_id: str, remote, principal) -> bool:
+    """An earlier full-refund verification, still bound to this transfer's current principal."""
+    if remote is not None:
+        if principal is None:
+            return False
+        return _audit_exists(conn, incident_id, "refund_verified", _refund_detail(transfer_id, principal))
+    rows = conn.execute(
+        "SELECT detail FROM audit_event WHERE incident_id = ? AND kind = 'refund_verified'", (incident_id,)
+    ).fetchall()
+    return any(row["detail"].startswith(f"source={transfer_id} amount=") for row in rows)
 
 
 def _remembered_reversal(conn, incident_id: int, transfer_id: str) -> tuple[bool, Decimal | None]:

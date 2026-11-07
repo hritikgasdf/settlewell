@@ -39,6 +39,7 @@ class BalanceHistoryItem:
     transaction_type: str | None
     account_type: str | None
     reference: str | None
+    status: str | None = None  # as returned; None when the response carries none
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,7 @@ def parse_history_item(data: dict) -> BalanceHistoryItem:
         transaction_type=_str(data.get("transaction_type")),
         account_type=_str(data.get("account_type")),
         reference=_str(data.get("reference")),
+        status=_str(data.get("status")),
     )
 
 

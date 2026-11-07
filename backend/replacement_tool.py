@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.outcomes import reversal_for
+from backend.outcomes import HistoryError, full_refund, refund_currency, reversals_for
 from backend.paid_once import find_matches, scan_paid_once
 from backend.policy import Action, code_from_reason, decide
 from backend.repaid import _unresolved_tracked, colleague_repaid, open_extra, terminal_ids
@@ -35,12 +35,19 @@ def refund_card(conn, client, *, obligation_id: int) -> RefundCard:
     if original is None or not original["airwallex_id"]:
         return RefundCard(False, None)
     remote = client.get_transfer(original["airwallex_id"])
-    reversal = _reversal_for(client, original["airwallex_id"], remote.transfer_currency)
-    if reversal is None or reversal.amount is None:
+    try:
+        reversals = reversals_for(client, original["airwallex_id"], refund_currency(remote))
+    except HistoryError:
         return RefundCard(False, None)
-    fee = remote.fee_amount if remote.fee_amount is not None else Decimal(0)
-    principal = _money(reversal.currency or remote.transfer_currency, abs(Decimal(reversal.amount)))
-    lost = _money(remote.fee_currency or remote.transfer_currency, Decimal(fee))
+    reversal = full_refund(remote, reversals)
+    if reversal is None:
+        return RefundCard(False, None)
+    fee = remote.fee_amount
+    principal = _money(reversal.currency or remote.transfer_currency, Decimal(reversal.amount))
+    if fee is None or not Decimal(fee).is_finite() or Decimal(fee) < 0:
+        lost = "unknown"  # the payout gate refuses an unknown fee; the card never shows it as zero
+    else:
+        lost = _money(remote.fee_currency or remote.transfer_currency, Decimal(fee))
     text = f"principal back: {principal} · fee lost {lost}"
     return RefundCard(True, text)
 
@@ -93,10 +100,11 @@ def propose_replacement(
         raise ReplaceError("incident")
     if incident["state"] == "CLOSED":
         raise ReplaceError("repaid")
-    card = refund_card(conn, client, obligation_id=obligation_id)
-    if not card.unlocked:
-        raise ReplaceError("refund")
     if not _own_attempt_recorded(conn, intent_id):
+        # A request we already recorded recovers first, by request id, without the refund or funding again.
+        card = refund_card(conn, client, obligation_id=obligation_id)
+        if not card.unlocked:
+            raise ReplaceError("refund")
         _refuse_on_scan(conn, client, obligation_id, incident_ref)
     original = conn.execute(
         "SELECT * FROM transfer_record WHERE id = ?",
@@ -188,8 +196,6 @@ def _next_attempt(conn, invoice_ref: str) -> int:
             numbers.append(int(suffix))
     return max(numbers, default=0) + 1
 
-
-_reversal_for = reversal_for
 
 
 _SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}

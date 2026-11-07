@@ -51,6 +51,13 @@ class Record:
             page_after=None,
         )
 
+    def current_balances(self):
+        from backend.airwallex.types import Balance
+
+        return [
+            Balance("EUR", Decimal("100000.00"), Decimal(0), Decimal(0), Decimal("100000.00"), Decimal(0), account_type="cash"),
+        ]
+
     def create_transfer(self, **kwargs):
         self.created.append(kwargs)
         return Transfer(
@@ -59,6 +66,8 @@ class Record:
             request_id=kwargs["request_id"],
             transfer_amount=kwargs["transfer_amount"],
             transfer_currency=kwargs["transfer_currency"],
+            fee_amount=Decimal("13.47"),
+            fee_currency="EUR",
             reference="INV-2291",
         )
 

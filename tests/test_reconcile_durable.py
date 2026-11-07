@@ -111,7 +111,7 @@ class World:
 
     def current_balances(self):
         value = Decimal("100000.00")
-        return [Balance("EUR", value, Decimal(0), Decimal(0), value, Decimal(0))]
+        return [Balance("EUR", value, Decimal(0), Decimal(0), value, Decimal(0), account_type="cash")]
 
     def create_transfer(self, **kwargs):
         self.created.append(kwargs)

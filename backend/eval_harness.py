@@ -8,7 +8,13 @@ import json
 from dataclasses import dataclass
 from decimal import Decimal
 
-from backend.airwallex.types import BalanceHistoryItem, BalanceHistoryPage, Transfer, TransferPage
+from backend.airwallex.types import (
+    Balance,
+    BalanceHistoryItem,
+    BalanceHistoryPage,
+    Transfer,
+    TransferPage,
+)
 from backend.approvals import (
     AP_CLERK,
     FINANCE_APPROVER,
@@ -420,6 +426,14 @@ class _Pay:
         self.reversal = reversal
         self.fee_amount = fee_amount
         self.created: list[str] = []
+
+    def current_balances(self) -> list[Balance]:
+        """Offline fake: sufficient settled cash in both currencies. Not the Airwallex adapter."""
+        cash = Decimal("100000.00")
+        return [
+            Balance("EUR", cash, Decimal(0), Decimal(0), cash, Decimal(0), account_type="cash"),
+            Balance("USD", cash, Decimal(0), Decimal(0), cash, Decimal(0), account_type="cash"),
+        ]
 
     def get_transfer(self, transfer_id: str) -> Transfer:
         if self.colleague is not None and transfer_id == self.colleague.id:

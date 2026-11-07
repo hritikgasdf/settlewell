@@ -172,14 +172,19 @@ def execute_fx_quote(
             )
         raise
     record_fx_conversion(conn, quote_id, conversion.conversion_id)
-    remember_remote(conn, int(intent["id"]), conversion.conversion_id, "converted")
-    if hasattr(client, "current_balances"):
-        from backend.fx_funding import _available, _snapshot
-
-        after = client.current_balances()
-        _snapshot(conn, "EUR", _available(after, "EUR"), as_of, "after")
-        _snapshot(conn, "USD", _available(after, "USD"), as_of, "after")
+    # The real remote status, never a blind "converted". Only SETTLED later releases a payout.
+    remember_remote(conn, int(intent["id"]), conversion.conversion_id, conversion.status or "unknown")
     conn.commit()
+    if hasattr(client, "current_balances"):
+        from backend.fx_funding import FundingError, _available, _snapshot
+
+        try:  # the conversion is already stored; an unreadable balance only skips the snapshot
+            after = client.current_balances()
+            _snapshot(conn, "EUR", _available(after, "EUR"), as_of, "after")
+            _snapshot(conn, "USD", _available(after, "USD"), as_of, "after")
+        except (FundingError, AirwallexError, TimeoutError, OSError):
+            conn.rollback()
+        conn.commit()
     return FxDecision("converted", str(terms.quote_id), approval_id, conversion.conversion_id)
 
 
@@ -296,7 +301,7 @@ def _finish_conversion(conn, intent, quote_id: str, approval_id: int, conversion
                 raise FxQuoteError("consumed") from None
     else:
         raise FxQuoteError("consumed")
-    remember_remote(conn, int(intent["id"]), conversion_id, conversion.status or "converted")
+    remember_remote(conn, int(intent["id"]), conversion_id, conversion.status or "unknown")
     conn.commit()
     return FxDecision("converted", quote_id, approval_id, conversion_id)
 
