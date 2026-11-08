@@ -58,7 +58,7 @@ NEW_BANK = {
         "address": OLD_BANK["beneficiary"]["address"],
         "bank_details": {"account_name": "Lumen Textiles GmbH", "account_currency": "EUR",
                          "bank_country_code": "DE", "bank_name": "Deutsche Kreditbank",
-                         "iban": "DE89370400440532017781", "swift_code": "BYLADEM1001"},
+                         "iban": "DE02120300000000202051", "swift_code": "BYLADEM1001"},
     },
     "nickname": "settlewell-hero-new", "transfer_methods": ["SWIFT"],
 }
@@ -118,6 +118,8 @@ class Hero:
         for key in ("requests", "intents", "ids", "beats", *ID_MAPS):
             self.m.setdefault(key, {})
         self.m["mode"] = "SANDBOX"
+        if self.m["db"] != ":memory:":  # owned DB only: create the missing parent, never touch existing files
+            Path(self.m["db"]).parent.mkdir(parents=True, exist_ok=True)
         self.conn = connect(self.m["db"])
         migrate(self.conn)
         self.save()
@@ -172,7 +174,7 @@ class Hero:
         found = next((t for t in items if t.request_id == req), None)  # exact ownership only
         if found is None:
             kwargs = {
-                "transfer_amount": AMOUNT, "transfer_currency": "EUR", "source_currency": "USD",
+                "transfer_amount": AMOUNT, "transfer_currency": "EUR", "source_currency": "EUR",
                 "beneficiary_id": ben, "transfer_method": "SWIFT", "reference": self.m["ids"]["ref"],
                 "reason": "other_services", "request_id": req,
             }
@@ -322,7 +324,8 @@ class Hero:
             now = self.now()
             card = verify_bank_change(
                 self.conn, self.client, obligation_id=ob, incident_ref=str(inc),
-                bank_name="Deutsche Kreditbank", account_last4="7781", beneficiary=NEW_BANK,
+                bank_name="Deutsche Kreditbank", account_last4=NEW_BANK["beneficiary"]["bank_details"]["iban"][-4:],
+                beneficiary=NEW_BANK,
                 confirmation=CallbackConfirmation(phone="+49-30-000000", confirmed=True,
                                                   attested_by=FINANCE_APPROVER, attested_at=now))
             row = self.conn.execute(
@@ -383,6 +386,10 @@ class Hero:
             beneficiary_id=self.m["ids"]["new_ben"], details_hash=self.m["ids"]["details_hash"],
             failure_code="90701")
         new_id = self._remote_id(intent)
+        req = self.conn.execute("SELECT request_id FROM execution_intent WHERE id = ? AND state = 'executed' "
+                                "AND remote_id = ?", (intent, new_id)).fetchone()
+        if req is not None and req["request_id"]:
+            self.m["requests"]["replacement"] = req["request_id"]
         self.m["transfers"][new_id] = "SENT"
         self.m["ids"]["replacement"] = new_id
         self.save()

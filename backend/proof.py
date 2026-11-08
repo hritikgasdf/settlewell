@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from backend.ledger import append_audit
+from backend.ledger import append_audit, ensure_proof_blob
 from backend.policy import code_from_reason, decide
 
+BANK_ORIGIN = "airwallex_confirmation_letter"
+BANK_LABEL = "Airwallex confirmation letter (NO_FEE_DISPLAY) - bank-issued PDF"
 ETA_LABEL = "Estimated · from Airwallex published flight times"
 CUTOFF_LABEL = "Assumed cut-off · not an Airwallex API field"
 TRACE_LABEL = "Draft support request · not retrieved from the bank network"
@@ -60,18 +62,37 @@ def issue_proof(conn, client, transfer_record_id: int, *, incident_id: int, seen
             trace_draft=None,
             reply_draft=_reply(attached=False, status=remote.status, eta=eta),
         )
+    # Re-check immediately before the bank download: a status change since the read fails closed.
+    fresh = client.get_transfer(record["airwallex_id"])
+    if not decide(fresh.status, failure_code=code_from_reason(fresh.failure_reason), claim="proof").proof_allowed:
+        append_audit(conn, incident_id=incident_id, kind="proof_refused",
+                     detail=f"status={fresh.status}", created_at=seen_at)
+        conn.commit()
+        return ProofResult(attached=False, rule_id=decision.rule_id, sha256=None, eta=eta, cutoff_label=cutoff,
+                           trace_draft=None, reply_draft=_reply(attached=False, status=fresh.status, eta=eta))
+    remote = fresh
     letter = client.create_confirmation_letter(
         transaction_id=remote.id,
         letter_format="NO_FEE_DISPLAY",
     )
-    digest = hashlib.sha256(letter.content).hexdigest()
-    conn.execute(
+    content = bytes(letter.content)
+    is_pdf = content.startswith(b"%PDF-")  # non-PDF bytes keep the hash only and are never served
+    digest = hashlib.sha256(content).hexdigest()
+    ensure_proof_blob(conn)
+    # Document row and bytes share one transaction (committed below) so they never diverge.
+    cur = conn.execute(
         """
         INSERT INTO proof_document (transfer_record_id, format, status_at_issue, sha256, sent_at)
         VALUES (?, 'NO_FEE_DISPLAY', ?, ?, NULL)
         """,
         (transfer_record_id, remote.status, digest),
     )
+    if is_pdf:
+        conn.execute(
+            """INSERT INTO proof_blob (proof_document_id, content, sha256, origin, label)
+            VALUES (?, ?, ?, ?, ?)""",
+            (cur.lastrowid, content, digest, BANK_ORIGIN, BANK_LABEL),
+        )
     append_audit(
         conn,
         incident_id=incident_id,

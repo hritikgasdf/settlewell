@@ -18,18 +18,18 @@ Read this table before any claim in the README, the plan or a recording.
 
 | Surface | Status | Label in the product |
 |---|---|---|
-| Proof PDF from the local demo API | **Synthetic.** Generated locally, not issued by Airwallex | `MOCK / SYNTHETIC - not Airwallex proof, no bank or network confirmation` |
+| Proof PDF | **Sandbox: genuine bank PDF**, fetched, persisted and served only after live status/ownership/hash checks. **Mock seed: synthetic**, never bank proof | Origin label; mock bytes explicitly labelled synthetic |
 | Supplier reply in the outbox | **Local queue only.** Nothing is delivered. No email is sent | Outbox row plus an audit row |
 | Webhooks in the local API | **Simulated.** `backend.scripts.simulate_webhook` sends signed synthetic events to loopback. Hosted delivery from Airwallex is **not verified**; no webhook registration is wired | MOCK |
-| Fees | **Conservative estimates** from the transfer record and the fee amounts shown in the sandbox. Not a provider fee quote | Labelled as estimated |
+| Fees | Use provider fee when available; otherwise a **conservative estimated upper bound**, not a provider quote. This run: actual EUR13.50 payout fee confirmed in cash history (not the historical EUR13.47) | Estimated fallback remains labelled |
 | Sandbox money | **Virtual.** Airwallex sandbox simulated funds, no real bank movement | Banner: synthetic supplier, sandbox funds |
 | Production use | **Unsupported.** No production credentials, hosting, monitoring or key management exist | Not offered |
-| Claim parser | **Code path calls Claude** (`ANTHROPIC_API_KEY`), but no fresh live call has been run from this tree. Tests and the demo use an offline deterministic completer | Offline parser in tests and demo |
+| Claim parser | **Live Claude verified** on this box with `claude-haiku-4-5-20251001`; strict validation and pinned-supplier matching retained. Offline tests use a deterministic completer | Model proposes only; no money tools |
 | Beneficiary change | A person enters the call-back attestation text. Software does not verify the call-back or the bank | Attestation recorded, not verified |
 | User authentication | **None.** The console has no login. Writes need a loopback Host, an allowed Origin and a per-process CSRF token. Approver identities are demo labels | MOCK |
 | Replay (`/replay`) | **MOCK.** Canned statuses, letter, `PAYOUT_REVERSAL` and quote rate | MOCK |
 | 30-incident eval and runner | **Offline MOCK.** No Airwallex call, no secrets | MOCK |
-| Sandbox console pages | Read the local ledger. They do not call Airwallex | Local ledger |
+| Sandbox React console/API | **Live adapter wired**. HTTP outreach approval verified; replacement and FX executed by hero through the same execution boundary, not clicked in the browser | SANDBOX banner; local-only demo identities |
 
 ## Historical sandbox run (not current evidence)
 
@@ -37,14 +37,30 @@ A hero run was recorded on `api-demo.airwallex.com` on 2026-11-04, with `x-api-v
 
 - It ran against an earlier tree, before the current commits. It was **not re-run** for this document.
 - It does not show that the current code passes a live run.
-- No final live PASS is claimed for the current tree. A new sandbox run is pending and would need an operator to start it on a machine that holds the sandbox credentials.
+- Fresh current sandbox evidence follows; the older rehearsal remains historical.
 
-## Current verification status
+## Live proof — 2026-11-08 (IST), this box
 
-- Final sandbox and real-Claude checks: **NOT RUN.** The requested local test computer was offline, so this tree has had no live, sandbox or real Claude call.
-- A headless browser screenshot attempt failed (one attempt, no `console.png`).
-- Offline MOCK checks: the API served in MOCK mode and the console dev server responded. The signed webhook simulator sent a synthetic event to the loopback MOCK API and passed. Ruff, the offline incident runner, the mock hero run and the frontend build also exited 0.
-- The full `pytest` run in the same verification pass exited non-zero. No full-suite pass is claimed.
+Fresh real requests to the Airwallex **sandbox** completed the hero money path. These are virtual funds, not production or a real bank callback. No credential values or raw API responses are committed.
+
+| Object | Sandbox id | Observed outcome |
+|---|---|---|
+| Original transfer | `08ffee21-a813-4a10-96d9-8c18edec85cc` | SENT → simulated sandbox 90701 → CANCELLED; full EUR4200 cash reversal joined |
+| Scheduled duplicate | `d5eae955-420d-4dd1-b2cc-6c811e77fe90` | CANCELLED through approved execute; fully paginated cash history shows zero ledger entries/charge |
+| Replacement | `e64445c5-7942-408f-bcc2-924e0cfe60b4` | PAID; approved execute, request `stl-inv39391662-1`; EUR4200 plus actual EUR13.50 fee |
+| Old beneficiary | `a69525a5-bab0-4466-af7c-18cad8c8e2bb` | Pinned original bank record |
+| New beneficiary | `0c00da25-7210-42d0-a82c-5cf01f6875c1` | Created through approved execute; callback attestation scripted, not a real phone call |
+| Locked quote | `1006e5ba-1813-38c5-ade0-7e5c0b4e7c3a` | Bound to approved conversion |
+| Conversion | `103b9ab7-a7bc-468d-a146-ab62cb6843df` | SETTLED; bought EUR4340.50, sold USD4904.04 |
+
+- Final live available EUR10005186.25 stayed above the deliberately stricter demo reserve floor EUR10005172.75. The higher configured floor intentionally exercised FX on an otherwise well-funded sandbox wallet; it did not bypass the gate.
+- Original and replacement accounted for: obligation PAID_ONCE, primary incident CLOSED. The original `live_transfer_id` remains its immutable anchor.
+- Genuine stored replacement PDF served HTTP200/application/pdf after fresh sandbox status read; cancelled original URL refused HTTP404/no stored bytes. The hero also observed cancellation policy refusing a new proof. PDF bytes/DB remain outside git.
+- Separate live Claude parse: EUR4200, asks-where/new-account true; pinned match accepted, wrong pinned supplier refused. Invoice redacted in evidence.
+- Console served in SANDBOX; HTTP outreach approval200, wrong hash409, replay409. Outreach remains queued, **not sent**. Replacement/FX browser clicks not tested.
+- Mock runner: 30/30, 208 checks (**not** 30 live bank scenarios). Full local mock suite: 612 passed before the last focused PDF/reset fixes; their targeted regressions pass. Final-head CI is authoritative for the combined suite.
+- Signed webhook simulator exercised loopback HTTP, not provider-hosted delivery. Scoped reset verified owned terminal transfers and removed only this run's DB/manifests; evidence was preserved outside git.
+- One headless screenshot attempt timed out; no screenshot or video is claimed. Callback, email delivery, hosted webhooks, live concurrency/timeouts/quote replay/expiry and production operation remain unverified or simulated.
 
 ## Setup
 
@@ -88,9 +104,9 @@ Copy `.env.example` to `.env` if you want a local note of the variable names. Th
 
 ## Local demo API (MOCK only)
 
-`uv run python -m backend.api` serves a JSON API on 127.0.0.1:8765 over a persisted SQLite demo DB (`var/settlewell.db`, seeded once). Approve, reject and cancel are routed through `backend.execute` with bound, single-use approvals. Writes need a loopback Host, an allowed Origin and the CSRF token from `GET /api/session`. They are accepted in MOCK mode. The SANDBOX write guard is implemented and targeted MOCK-transport tested, but live sandbox/browser action is still NOT RUN, so SANDBOX console writes are not verified. There is no production authentication.
+`uv run python -m backend.api` serves a JSON API on 127.0.0.1:8765 over a persisted SQLite demo DB (`var/settlewell.db`, seeded once). Approve, reject and cancel are routed through `backend.execute` with bound, single-use approvals. Writes need a loopback Host, an allowed Origin and the CSRF token from `GET /api/session`. They are accepted in MOCK mode. SANDBOX HTTP outreach approval, stale-hash refusal and replay refusal were verified live; replacement and FX ran via hero execute, not browser buttons. There is no production authentication.
 
-Seeded demo (new DB only): INV-2291 has a claim parsed offline by `claims.parse_email` with a mock completer. The supplier identity comes from the obligation, not the email. The claim shows as matched only when the parse matched the pinned supplier. The INV-2291 proof is one generated MOCK / SYNTHETIC PDF stored in `proof_blob`. `GET /api/incidents/{id}/proof/{document_id}/pdf` serves it only when the transfer is the live one, no webhook settle window is pending, the local and remote statuses allow a proof (SENT or PAID), and the stored hash matches. Otherwise it returns a JSON refusal with `gate_code`. An existing database is not reseeded. For a fresh MOCK demo, use a separate `--db` path; never delete or overwrite a sandbox ledger containing remote attempts.
+Seeded demo (new DB only): INV-2291 has a claim parsed offline by `claims.parse_email` with a mock completer. The supplier identity comes from the obligation, not the email. The claim shows as matched only when the parse matched the pinned supplier. The INV-2291 proof is one generated MOCK / SYNTHETIC PDF stored in `proof_blob`. `GET /api/incidents/{id}/proof/{document_id}/pdf` serves it only when the transfer is the original anchor or the latest exactly-owned executed replacement, no webhook settle window is pending, the local and remote statuses allow a proof (SENT or PAID), and the stored hash matches. Otherwise it returns a JSON refusal with `gate_code`. An existing database is not reseeded. For a fresh MOCK demo, use a separate `--db` path; never delete or overwrite a sandbox ledger containing remote attempts.
 
 The replacement and FX tests use `client_factory` with a stateful fake remote. The default demo client implements only `get_transfer` and `cancel_transfer`, so a replacement or FX intent against it is refused, not sent.
 
@@ -106,7 +122,7 @@ uv run python -m backend.scripts.simulate_webhook --status PAID --transfer-id sy
 - Event ids are deduplicated in SQLite. The ordering key is the payload's `created_at`. A later failure beats an earlier PAID, and a failure wins a timestamp tie. The status-rank ordering in the plan is **not** implemented as a sort.
 - A webhook never unlocks money. It opens a durable 10-second settle window. After that the worker reads the remote status through the shared reconciler (`backend.reconcile`). If that read fails or is incomplete, the window stays open and nothing closes or unlocks.
 - The worker (`backend.worker`, every 5 s) settles windows, resumes an intent whose approval is already consumed (through `backend.execute`, no second approval), and polls every incident. It is a local process, not a hosted service.
-- Limits: local MOCK only. No live webhook registration. The simulator sends synthetic events to loopback only. The real adapter is not wired into this API.
+- Limits: local demo only. No hosted webhook registration. The simulator sends synthetic events to loopback; sandbox mode uses the real adapter.
 
 ## Launcher and hero run (operator)
 
@@ -119,7 +135,7 @@ bash scripts/run_console.sh --mode mock --api-port 8877 --ui-port 15173
 
 The script is not executable in the repo, so run it with `bash`. Ports must be 1024–65535, differ, and be free. An occupied port is refused, not killed. Sandbox mode is `bash scripts/run_console.sh --mode sandbox`, which reads the DB from the hero manifest.
 
-Hero run against the sandbox (operator only; not run for this tree):
+Hero run against the sandbox (operator only; verified on this box):
 
 ```bash
 uv run python -m backend.scripts.hero_run --sandbox --confirm-sandbox \
@@ -130,7 +146,7 @@ uv run python -m backend.scripts.hero_run --reset --sandbox --confirm-sandbox \
 
 - The sandbox run needs `--sandbox --confirm-sandbox`. Without it the command is refused.
 - The owned reset releases only transfers in the run's manifest (or with an exact stored request id). It refuses to remove the manifest or DB while an owned transfer is unresolved.
-- The sandbox path has been exercised only against offline fakes. Live sandbox behaviour is unverified.
+- The complete sandbox money path was exercised on this box; see the live-proof IDs and explicit remaining limitations above.
 - The mock hero (`SETTLEWELL_MOCK=1 uv run python -m backend.scripts.hero_run --mock`) runs a canned replay. Only `approved_replacement` and `reconcile_both` can PASS. The other seven beats print PARTIAL.
 
 ## Operator console (frontend, MOCK only)
@@ -158,7 +174,7 @@ npm run build      # tsc --noEmit, then vite build into frontend/dist
 npm run preview    # serves frontend/dist on 127.0.0.1:5173; the backend must still be running
 ```
 
-Limits: local demo. No login. Writes need an allowed Origin and the per-process CSRF token. They are accepted in MOCK mode. SANDBOX-mode writes are not verified: the guard is implemented and targeted MOCK-transport tested, but live sandbox/browser action is NOT RUN (see the write-guard note above). The seeded demo exercises the cancel path end to end. The replacement and FX paths are not exercised from the console. To reset this MOCK-only ledger, stop the backend and delete `var/settlewell.db`, but only when the demo owns no remote payments. Do not delete a live sandbox DB or one with unresolved request IDs by hand; the only live reset is the owned hero `--reset` routine.
+Limits: local demo. No login. Writes need an allowed Origin and the per-process CSRF token. They are accepted in MOCK mode. SANDBOX HTTP outreach approval and replay refusal were verified; browser money-button clicks were not. The seeded demo exercises the cancel path end to end. The replacement and FX paths ran through hero execute, not console clicks. To reset this MOCK-only ledger, stop the backend and delete `var/settlewell.db`, but only when the demo owns no remote payments. Do not delete a live sandbox DB or one with unresolved request IDs by hand; the only live reset is the owned hero `--reset` routine.
 
 ## No-LLM baseline (static table)
 
@@ -205,18 +221,18 @@ Case 7 proposes new details and pays them only after a call-back verifies a new 
 - **Traces** are drafted support requests. Settlewell does not retrieve an MT103 or a UETR.
 - **Cancelling a PROCESSING transfer** is not a behaviour this demo claims.
 - **Supplier replies** sit in the local outbox until a person approves them. Nothing is sent, and no email is delivered.
-- **Claude parsing**: the live call path exists, but this tree has no fresh live run. Offline tests use a deterministic completer.
+- **Claude parsing**: live Haiku parse and pinned-identity rejection verified; offline tests use a deterministic completer.
 - **Approvals**: the bound, single-use approval is implemented in `backend/approvals.py` and `backend/execute.py`. The FX quote and payout paths check the binding hash too. Not every path has been traced end to end in the current pass, so `docs/plan-to-code.md` lists the status of each item. The 2026-11-07 audit is historical; several of its findings are fixed in current code.
 - **Beneficiary change**: the call-back attestation is entered by a person. Software does not verify it.
 - **Webhooks**: simulated locally. Hosted delivery and retry behaviour are not verified.
-- **Fees**: estimates. The provider fee quote is not captured.
+- **Fees**: provider fee used where available, otherwise conservative estimate. The actual replacement fee in this run was EUR13.50, confirmed by cash history; a pre-send provider quote was not independently demonstrated.
 - **Sandbox money** is virtual. Production use is unsupported.
 - **Reset**: the sandbox reset releases only transfers the run owns (manifest id or exact stored request id). It refuses when it cannot verify. The mock reset removes only the manifest and does not clear the ledger. Remote state beyond the owned transfers is not cleaned.
 - **Authentication**: none for users. CSRF protects local writes only.
 
 ## Feature freeze
 
-The payment behaviour is frozen. No new actions, incidents or console pages. A rehearsal can still fix a broken run. The video and the writeup come after this line. Final test and live results are not asserted here; they are pending, see `docs/plan-to-code.md`.
+The payment behaviour is frozen. No new actions, incidents or console pages. A rehearsal can still fix a broken run. The video and the writeup come after this line. Scoped live sandbox results and remaining partials are documented above; see `docs/plan-to-code.md`.
 
 ## MCP
 

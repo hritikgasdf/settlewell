@@ -85,3 +85,45 @@ def test_driver_creates_refuse_without_confirm_or_wrong_host():
     remote._base_url = "https://api.airwallex.com"
     with pytest.raises(SandboxContractError):
         SandboxDriver(remote, confirm_sandbox=True).create_owned_beneficiary({})
+
+
+def _iban_mod97(iban: str) -> bool:
+    s = iban[4:] + iban[:4]
+    return int("".join(str(int(c, 36)) for c in s)) % 97 == 1
+
+
+def test_new_bank_fixture_is_valid_distinct_dkb_iban():
+    from backend.hero_live import NEW_BANK, OLD_BANK
+
+    new = NEW_BANK["beneficiary"]["bank_details"]
+    old = OLD_BANK["beneficiary"]["bank_details"]
+    assert _iban_mod97(new["iban"]) and _iban_mod97(old["iban"])
+    assert new["iban"].startswith("DE") and len(new["iban"]) == 22
+    assert new["bank_country_code"] == "DE"
+    assert new["iban"][4:12] == "12030000"  # DKB routing (BLZ)
+    assert new["swift_code"].startswith("BYLADEM")
+    assert new["iban"] != old["iban"] and new["swift_code"] != old["swift_code"]
+
+
+def test_hero_binds_last4_to_new_iban():
+    import inspect
+
+    from backend import hero_live
+
+    src = inspect.getsource(hero_live)
+    assert 'account_last4="7781"' not in src
+    assert 'NEW_BANK["beneficiary"]["bank_details"]["iban"][-4:]' in src
+    assert hero_live.NEW_BANK["beneficiary"]["bank_details"]["iban"][-4:] == "2051"
+
+
+def test_original_and_duplicate_fixtures_share_eur_source_currency(tmp_path):
+    """Controlled fixture: no incidental FX; the full-principal refund currency matches the transfer."""
+    remote = Remote()
+    _hero(tmp_path, remote).run()
+    ids = load_manifest(str(tmp_path / "m.json"))["ids"]
+    orig, dup = remote.transfers[ids["orig"]], remote.transfers[ids["dup"]]
+    assert orig.transfer_currency == dup.transfer_currency == "EUR"
+    assert orig.transfer_amount == dup.transfer_amount
+    sent = [p for p in remote.posts if p.get("request_id") in (orig.request_id, dup.request_id)]
+    assert len(sent) == 2
+    assert {(p["transfer_currency"], p["source_currency"]) for p in sent} == {("EUR", "EUR")}

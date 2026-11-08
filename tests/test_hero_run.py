@@ -165,3 +165,12 @@ def test_reset_refuses_when_still_in_flight(tmp_path):
     ok, problems = hero_run.reset_owned(path, client, _Driver(client, "SENT"))
     assert not ok and problems == ["tr_owned:SENT"] and db.exists()
     assert hero_run.load_manifest(path)["transfers"]
+
+
+def test_owned_db_parent_is_created_on_fresh_checkout(tmp_path):
+    from backend.hero_live import Hero
+
+    db = tmp_path / "var" / "nested" / "live.db"
+    hero = Hero(object(), object(), str(tmp_path / "var" / "m.json"), str(db))
+    assert db.exists() and hero.m["db"] == str(db)
+    hero.conn.close()

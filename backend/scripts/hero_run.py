@@ -86,12 +86,33 @@ def _bound_db(manifest: dict, manifest_path: str) -> Path | None:
     return path if all(r == f"INV-{run}" for r in refs) else None
 
 
+def _ledger_owned_requests(manifest: dict, manifest_path: str) -> set[str]:
+    """Request ids of this run's genuine executed replacements, from its BOUND ledger only.
+
+    No bound DB (or any read error) means no extra ownership: the remote then stays foreign."""
+    db = _bound_db(manifest, manifest_path)
+    if db is None:
+        return set()
+    try:
+        conn = sqlite3.connect(f"file:{db.resolve()}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT e.request_id FROM execution_intent e JOIN obligation o ON o.id = e.obligation_id "
+                "WHERE e.kind = 'replacement' AND e.state = 'executed' AND e.remote_id IS NOT NULL "
+                "AND e.request_id IS NOT NULL AND o.invoice_ref = ?", (f"INV-{manifest['run']}",)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return set()
+    return {r[0] for r in rows}
+
+
 def reset_owned(manifest_path: str, client, driver) -> tuple[bool, list[str]]:
     """Release/cancel only transfers owned by this run's request ids; refuse on anything unresolved,
     foreign or unbound. Transfers are found by manifest id AND exact request-id lookup, so a crash
     before an id was saved cannot leave an orphan behind."""
     manifest = load_manifest(manifest_path)
-    owned_requests = set((manifest.get("requests") or {}).values())
+    owned_requests = set((manifest.get("requests") or {}).values()) | _ledger_owned_requests(manifest, manifest_path)
     problems: list[str] = []
     transfer_ids = set(manifest.get("transfers") or {})
     for req in sorted(owned_requests):

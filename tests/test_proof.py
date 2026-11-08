@@ -88,3 +88,45 @@ def test_wait_reply_while_processing_does_not_fetch_a_letter():
     assert client.calls == []
     assert "still on its way" in result.reply_draft
     assert ETA_LABEL in result.reply_draft
+
+
+def test_bank_letter_bytes_persist_atomically_and_serve_without_mock_seed():
+    from backend import api_proof
+
+    conn, incident_id, transfer_id = _seed()
+    conn.execute("DROP TABLE proof_blob")  # legacy DB created before the table existed
+    client = Letters("PAID")
+    issue_proof(conn, client, transfer_id, incident_id=incident_id, seen_at="2026-11-03T12:00:00+00:00")
+    doc = conn.execute("SELECT * FROM proof_document").fetchone()
+    blob = conn.execute("SELECT * FROM proof_blob").fetchone()
+    assert blob["content"] == b"%PDF-1.4 proof"
+    assert blob["sha256"] == doc["sha256"] == hashlib.sha256(b"%PDF-1.4 proof").hexdigest()
+    assert blob["origin"] == "airwallex_confirmation_letter"
+    assert "MOCK" not in blob["label"] and "SYNTHETIC" not in blob["label"]
+    ob_id = conn.execute("SELECT obligation_id FROM transfer_record WHERE id = ?", (transfer_id,)).fetchone()[0]
+    conn.execute("UPDATE obligation SET live_transfer_id = ? WHERE id = ?", (transfer_id, ob_id))
+    conn.execute("UPDATE transfer_record SET status = 'PAID' WHERE id = ?", (transfer_id,))
+    data, headers = api_proof.load_pdf(conn, lambda c: client, incident_id, doc["id"])
+    assert data == b"%PDF-1.4 proof"
+    assert headers["X-Settlewell-Proof-Origin"] == "airwallex_confirmation_letter"
+    conn.execute("UPDATE proof_blob SET sha256 = 'bad'")
+    try:
+        api_proof.load_pdf(conn, lambda c: client, incident_id, doc["id"])
+        raise AssertionError("tampered hash must refuse")
+    except LookupError as exc:
+        assert exc.args[1] == 409
+
+
+def test_cancelled_never_downloads_and_missing_blob_is_graceful():
+    from backend import api_proof
+
+    conn, incident_id, transfer_id = _seed()
+    client = Letters("CANCELLED")
+    result = issue_proof(conn, client, transfer_id, incident_id=incident_id, seen_at="2026-11-03T12:00:00+00:00")
+    assert result.attached is False and client.calls == []
+    assert conn.execute("SELECT COUNT(*) FROM proof_blob").fetchone()[0] == 0
+    conn.execute("DROP TABLE proof_blob")
+    try:
+        api_proof.load_pdf(conn, lambda c: client, incident_id, 999)
+    except LookupError as exc:
+        assert exc.args[1] == 404

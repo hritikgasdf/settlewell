@@ -147,3 +147,47 @@ def test_contract_cli_mock_makes_no_api_call(monkeypatch, capsys):
     monkeypatch.delenv("SETTLEWELL_SANDBOX", raising=False)
     assert run_contract_cli() == 0
     assert capsys.readouterr().out.strip() == "MOCK"
+
+
+class FeeUnknownCreate(ScriptedApi):
+    """Remote accepted the create (transfer exists by request_id) but answered 400 fee_unknown."""
+
+    def __init__(self, accepted: bool) -> None:
+        super().__init__()
+        self.accepted = accepted
+        self.creates = 0
+
+    def create_transfer(self, **_kwargs):
+        self.creates += 1
+        raise AirwallexError(400, "fee_unknown", "")
+
+    def list_transfers(self, **_kwargs):
+        from types import SimpleNamespace
+
+        items = (parse_transfer(self.transfer),) if self.accepted else ()
+        return SimpleNamespace(items=items, page_after=None)
+
+
+_ARGS = {
+    "transfer_amount": Decimal(20), "transfer_currency": "USD", "source_currency": "USD",
+    "beneficiary_id": "ben_1", "transfer_method": "LOCAL", "reference": "SW-CONTRACT",
+    "reason": "other_services", "request_id": "stl-contract-1",
+}
+
+
+def test_create_error_with_accepted_object_recovers_by_request_id_without_second_create():
+    api = FeeUnknownCreate(accepted=True)
+    result = run_closed_return(api, **_ARGS)
+    assert api.creates == 1 and result.passed
+
+
+def test_create_error_not_accepted_fails_closed_with_stage_and_request_id():
+    from backend import sandbox
+
+    api = FeeUnknownCreate(accepted=False)
+    with pytest.raises(AirwallexError):
+        run_closed_return(api, **_ARGS)
+    assert api.creates == 1  # never re-created
+    assert sandbox.LAST_TRACE["stage"] == "create_transfer"
+    assert sandbox.LAST_TRACE["request_id"] == "stl-contract-1"
+    assert sandbox.LAST_TRACE["accepted"] == "no"
