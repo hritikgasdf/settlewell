@@ -51,4 +51,6 @@
 - `backend/scripts/sandbox_contract.py` — Prove create → SENT → FAILED(90701) → CANCELLED on the sandbox.
 - `backend/scripts/seed_ledger.py` — Create Lumen Textiles, INV-2291, and its transfer in SQLite.
 - `backend/stop_duplicate.py` — Cancel a scheduled duplicate only after an approval. A refusal is re-read.
-- `backend/webhooks.py` — Webhook fast path. Polling remains the backstop when delivery is missed.
+- `backend/webhooks.py` — Webhook fast path. Signed, deduped, event-time ordered; a durable 10 s settle window, then the shared reconciler's remote read decides.
+- `backend/worker.py` — Periodic worker: settles webhook windows, resumes consumed-approval intents via execute, polls incidents and conversions by stored request id.
+- `backend/scripts/simulate_webhook.py` — Send one signed synthetic webhook to the loopback MOCK API. Prints only http status, event id and outcome.

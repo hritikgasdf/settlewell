@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from hypothesis import given, settings
@@ -147,6 +148,7 @@ class _World:
             body = {
                 "id": f"evt-{self.events}",
                 "name": f"payout.transfer.{status.lower()}",
+                "created_at": datetime.fromtimestamp(_NOW / 1000 + self.events, UTC).isoformat(),
                 "data": {"id": "awx-prop", "status": status},
             }
             raw = json.dumps(body, separators=(",", ":")).encode()

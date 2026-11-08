@@ -32,10 +32,18 @@ from backend.replace_payment import ReplaceError, _lookup_optional, _require_own
 _LOOKUP_ERRORS = (HistoryError, AirwallexError, TimeoutError, OSError, ReplaceError)
 
 
-def poll_incident(conn, client, incident_id: int, *, seen_at: str) -> list[dict]:
+def poll_incident(conn, client, incident_id: int, *, seen_at: str, settled: bool = False,
+                  report: dict | None = None) -> list[dict]:
     """Recover our own attempts by stored request id, read every payment, then decide once.
 
-    Reads only: nothing here creates, retries or posts a payment."""
+    Reads only: nothing here creates, retries or posts a payment. While a webhook settle
+    window is pending, only webhooks.settle (settled=True) may decide."""
+    from backend.webhooks import incident_pending
+
+    if not settled and incident_pending(conn, incident_id):
+        _audit_once(conn, incident_id, "poll_held_pending_webhook", str(incident_id), seen_at)
+        conn.commit()
+        return timeline(conn, incident_id)
     obligation = hero_bundle(conn, incident_id)["obligation"]
     recovered = _recover_attempts(conn, client, incident_id, obligation, seen_at)
     bundle = hero_bundle(conn, incident_id)
@@ -73,6 +81,8 @@ def poll_incident(conn, client, incident_id: int, *, seen_at: str) -> list[dict]
         outcomes.append(Outcome(remote.id, "replacement", remote.status, credited=kind == "duplicate"))
     if unresolved:
         _set_status(conn, obligation["id"], "IN_FLIGHT")
+    if report is not None:
+        report["incomplete"] = incomplete or original_id is None
     _decide(conn, incident_id, obligation, original_id, outcomes, incomplete, bool(unresolved), seen_at)
     conn.commit()
     return timeline(conn, incident_id)
