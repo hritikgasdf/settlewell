@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from backend.airwallex.types import (
     Balance,
+    BalanceHistoryPage,
     Beneficiary,
     BeneficiaryValidation,
     Conversion,
     FxQuote,
+    Transfer,
+    TransferPage,
 )
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, ApprovalTerms
 from backend.bank_change import BankChangeError, verify_bank_change
@@ -37,7 +41,7 @@ from backend.ledger import lock_fx_quote
 from backend.policy import decide
 from backend.proof import TRACE_LABEL, issue_proof, trace_draft
 from backend.replacement_tool import ReplaceError, propose_replacement, refund_card
-from backend.webhooks import promote_paid, receive_webhook
+from backend.webhooks import receive_webhook, settle
 from settlewell.flags import mock_mode
 
 _SEEN = "2026-11-03T12:00:00+00:00"
@@ -205,7 +209,11 @@ def _webhook_order(_case: dict) -> tuple[str, str, bool, bool]:
         failure_reason="90802: Beneficiary bank returned",
     )
     _deliver(conn, secret, "evt-paid", _NOW, "PAID", "payout.transfer.paid")
-    promote_paid(conn, _NOW + 20_000)
+    row = conn.execute(
+        "SELECT o.amount, o.currency, o.invoice_ref, t.request_id FROM obligation o "
+        "JOIN transfer_record t ON t.obligation_id = o.id WHERE t.airwallex_id = 'awx-eval-25'"
+    ).fetchone()
+    settle(conn, _Remote25(row), _NOW + 20_000)  # the remote read, not the payloads, is the authority
     status = conn.execute(
         "SELECT status, failure_message FROM transfer_record WHERE airwallex_id = 'awx-eval-25'"
     ).fetchone()
@@ -444,6 +452,30 @@ def _quote_terms(quote_id: str) -> ApprovalTerms:
     )
 
 
+class _Remote25:
+    """Read-only fake bound to the stored terms; the remote says the transfer was returned."""
+
+    def __init__(self, row) -> None:
+        self.row = row
+
+    def get_transfer(self, transfer_id):
+        return Transfer(
+            id=transfer_id,
+            status="CANCELLED",
+            request_id=self.row["request_id"],
+            transfer_amount=Decimal(self.row["amount"]),
+            transfer_currency=self.row["currency"],
+            reference=self.row["invoice_ref"],
+            failure_reason="90802: Beneficiary bank returned",
+        )
+
+    def balance_history(self, **_kwargs):
+        return BalanceHistoryPage(items=(), has_more=False, page_after=None)
+
+    def list_transfers(self, **_kwargs):
+        return TransferPage(items=(self.get_transfer("awx-eval-25"),), page_after=None)
+
+
 def _deliver(conn, secret: str, event_id: str, timestamp: int, status: str, name: str, **data) -> None:
     import hashlib
     import hmac
@@ -451,7 +483,12 @@ def _deliver(conn, secret: str, event_id: str, timestamp: int, status: str, name
     payload = {"id": "awx-eval-25", "status": status}
     payload.update(data)
     raw = json.dumps(
-        {"id": event_id, "name": name, "data": payload},
+        {
+            "id": event_id,
+            "name": name,
+            "data": payload,
+            "created_at": datetime.fromtimestamp(timestamp / 1000, UTC).isoformat(),
+        },
         separators=(",", ":"),
     ).encode()
     signature = hmac.new(secret.encode(), str(timestamp).encode() + raw, hashlib.sha256).hexdigest()

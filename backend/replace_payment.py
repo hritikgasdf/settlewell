@@ -95,6 +95,11 @@ def replace_payment(
             return _recover_recorded(
                 conn, client, obligation, request_id, intent_id, details_hash, amount, currency
             )
+        from backend.webhooks import obligation_pending
+
+        if obligation_pending(conn, obligation_id):  # unsettled webhook: nothing funded, claimed or sent
+            conn.rollback()
+            raise ReplaceError("pending_webhook")
         _refuse_unless_replaceable(conn, client, obligation)
         from backend import funding
         from backend.execute import ExecuteError, claim, remember_remote

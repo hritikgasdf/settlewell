@@ -7,12 +7,14 @@ refused unless SETTLEWELL_MOCK=1. GET handlers never write.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
 import secrets
 import sys
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -346,7 +348,8 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
 
 
 def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
-               port: int = DEFAULT_PORT) -> FastAPI:
+               port: int = DEFAULT_PORT, worker: bool = False, worker_interval: float = 5.0,
+               now_ms=None) -> FastAPI:
     path = db_path or os.environ.get("SETTLEWELL_DB", "var/settlewell.db")
     make_client = client_factory or LedgerMockClient
     now = clock or _now
@@ -354,7 +357,31 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
     origins = {f"http://{h}:{p}" for h in ("127.0.0.1", "localhost") for p in (port, UI_PORT)}
     if mock_enabled():
         init_db(path)
-    app = FastAPI(title="Settlewell local demo API", docs_url=None, redoc_url=None)
+    clock_ms = now_ms or (lambda: int(time.time() * 1000))
+    background = None
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        nonlocal background
+        if worker and mock_enabled():
+            from backend.worker import Worker
+
+            def open_conn():
+                conn = connect(path)
+                conn.execute("PRAGMA busy_timeout = 5000")
+                return conn
+
+            background = Worker(open_conn, lambda conn: make_client(conn), interval=worker_interval,
+                                clock_ms=clock_ms)
+            background.start()
+        try:
+            yield
+        finally:
+            if background is not None:
+                background.stop()
+                background = None
+
+    app = FastAPI(title="Settlewell local demo API", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     @app.exception_handler(ApiError)
     async def _api_error(_request, error: ApiError):
@@ -395,6 +422,31 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
             raise ApiError(403, "csrf_missing", f"{CSRF_HEADER} header required")
         if not hmac.compare_digest(sent, token):
             raise ApiError(403, "csrf_invalid", "bad CSRF token")
+
+    @app.post("/api/webhooks/airwallex")
+    async def airwallex_webhook(request: Request):
+        # Authenticated by the HMAC signature over the raw body, not by operator CSRF.
+        from backend.webhooks import MAX_BODY, WebhookError, receive_webhook
+
+        secret = os.environ.get("AIRWALLEX_WEBHOOK_SECRET", "")
+        if not secret.strip():
+            raise ApiError(503, "webhook_unconfigured", "webhook secret is not configured")
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_BODY:
+            raise ApiError(413, "body_too_large", "body too large")
+        raw = await request.body()
+        conn = db()
+        try:
+            result = receive_webhook(
+                conn, secret=secret, raw_body=raw,
+                x_timestamp=request.headers.get("x-timestamp", ""),
+                x_signature=request.headers.get("x-signature", ""), now_ms=clock_ms())
+        except WebhookError as error:
+            status = {"signature": 401, "stale": 400, "body": 400, "unconfigured": 503}[error.code]
+            raise ApiError(status, f"webhook_{error.code}", "webhook rejected") from None
+        finally:
+            conn.close()
+        return {"outcome": result.outcome}
 
     @app.get("/api/health")
     def health():
@@ -573,9 +625,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--db", default=os.environ.get("SETTLEWELL_DB", "var/settlewell.db"))
+    parser.add_argument("--no-worker", action="store_true", help="disable the periodic worker")
     args = parser.parse_args(argv)
     os.environ["SETTLEWELL_MOCK"] = "1"  # live money is not available in this API
-    uvicorn.run(create_app(args.db, port=args.port), host="127.0.0.1", port=args.port,
+    uvicorn.run(create_app(args.db, port=args.port, worker=not args.no_worker), host="127.0.0.1", port=args.port,
                 log_level="warning")
     return 0
 

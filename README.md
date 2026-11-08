@@ -63,6 +63,20 @@ Copy `.env.example` to `.env` if you want a local note of the variable names. Th
 
 `uv run python -m backend.api` serves a JSON API on 127.0.0.1:8765 over a persisted SQLite demo DB (`var/settlewell.db`, seeded once). Approve, reject and cancel all run through `backend.execute`. Writes need a loopback Host, an allowed Origin and the CSRF token from `GET /api/session`, and work only in MOCK mode. There is no production authentication. Contract: `settlewell-ctx/p15-api-contract.md`.
 
+### Webhooks and the periodic worker (local MOCK scope)
+
+```bash
+export AIRWALLEX_WEBHOOK_SECRET=<your local test secret>   # missing or blank => the endpoint answers 503
+SETTLEWELL_MOCK=1 uv run python -m backend.api              # worker is on; add --no-worker to turn it off
+uv run python -m backend.scripts.simulate_webhook --status PAID --transfer-id synthetic-inv-2291
+```
+
+- `POST /api/webhooks/airwallex` checks `x-signature` (hex HMAC-SHA256 of the `x-timestamp` header bytes plus the exact raw body, `x-timestamp` in Unix milliseconds) before parsing. Missing/bad signature, stale (>5 min) or future (>60 s) timestamps and bodies over 64 KiB are rejected. It is authenticated by signature, not by operator CSRF. Operator routes are unchanged.
+- Event ids are deduplicated in SQLite. Ordering uses the payload's `created_at` (event time), not the delivery header. A later failure wins over an earlier PAID; on a timestamp tie the failure wins.
+- A webhook never unlocks money. It opens a durable 10-second settle window. After it, the worker reads the remote status through the shared reconciler (`backend.reconcile`), which is the source of truth. If that read fails or is incomplete the window stays open and nothing closes or unlocks. Poll-only paths skip an incident while its window is open.
+- The worker (`backend.worker`, every 5 s) settles windows, resumes a proposed intent whose approval is already consumed through `backend.execute` (same intent, no second approval; a refusal stays held and audited), polls every incident (so a later bank return reopens a closed one), and binds a consumed FX quote to its conversion only by stored request id.
+- Limits: local MOCK only, no live webhook registration; the simulator sends synthetic events to loopback only. Real-adapter operation is not wired into this API.
+
 ## Operator console (frontend, MOCK only)
 
 A React + Vite + TypeScript console in `frontend/`. It shows incidents, payments, bank versions, funding, proposals and audit, and can approve or reject proposals and cancel a scheduled duplicate payment. It talks only to the local demo API.

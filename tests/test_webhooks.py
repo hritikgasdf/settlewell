@@ -4,13 +4,13 @@ import hashlib
 import hmac
 import json
 import threading
+from datetime import UTC, datetime
 
 import pytest
 
 from backend.ledger import connect, seed_hero
 from backend.webhooks import (
     WebhookError,
-    promote_paid,
     receive_webhook,
     register_webhook,
 )
@@ -28,7 +28,7 @@ def _signed(body: dict, timestamp: int, *, secret: str = SECRET) -> tuple[bytes,
 def _event(event_id: str, name: str, timestamp: int, status: str, **data) -> dict:
     payload = {"id": "awx-hero", "status": status, "transfer_currency": "EUR", "transfer_amount": "4200.00"}
     payload.update(data)
-    return {"id": event_id, "name": name, "data": payload, "created_at": "2026-11-03T12:00:00+00:00"}
+    return {"id": event_id, "name": name, "data": payload, "created_at": datetime.fromtimestamp(timestamp / 1000, UTC).isoformat()}
 
 
 def _deliver(conn, body: dict, timestamp: int, *, now: int = NOW, secret: str = SECRET):
@@ -140,7 +140,6 @@ def test_cancelled_before_failed_keeps_the_reason_and_does_not_mark_paid():
     assert _status(conn) == "CANCELLED"
     assert _reason(conn) == "90802: Beneficiary bank returned"
     assert _obligation(conn) == "OPEN"
-    promote_paid(conn, NOW + 20_000)
     assert _obligation(conn) == "OPEN"
 
 
@@ -189,44 +188,10 @@ def test_concurrent_replays_apply_the_event_once(tmp_path):
         thread.join()
     assert sorted(outcomes) == ["applied", "duplicate"]
     stored = connect(path)
-    assert _status(stored) == "PAID"
+    assert _status(stored) == "SENT"  # a payload is recorded, never taken as success
+    assert stored.execute("SELECT COUNT(*) FROM webhook_state").fetchone()[0] == 1
     assert stored.execute("SELECT COUNT(*) AS n FROM webhook_event").fetchone()["n"] == 1
     assert stored.execute("SELECT COUNT(*) AS n FROM status_snapshot").fetchone()["n"] == 1
-
-
-def test_paid_stays_provisional_until_the_settle_window():
-    conn = connect()
-    _hero(conn, status="SENT")
-    _deliver(conn, _event("evt-paid", "payout.transfer.paid", NOW, "PAID"), NOW)
-
-    assert _status(conn) == "PAID"
-    assert _obligation(conn) == "OPEN"
-    promote_paid(conn, NOW + 9_000)
-    assert _obligation(conn) == "OPEN"
-    promote_paid(conn, NOW + 10_000)
-    assert _obligation(conn) == "PAID_ONCE"
-
-
-def test_failed_inside_the_window_wins_over_paid():
-    conn = connect()
-    _hero(conn, status="SENT")
-    _deliver(conn, _event("evt-paid", "payout.transfer.paid", NOW, "PAID"), NOW)
-    _deliver(
-        conn,
-        _event(
-            "evt-failed",
-            "payout.transfer.failed",
-            NOW + 1_000,
-            "FAILED",
-            failure_reason="90701: Account closed",
-        ),
-        NOW + 1_000,
-    )
-
-    assert _status(conn) == "FAILED"
-    assert _reason(conn) == "90701: Account closed"
-    promote_paid(conn, NOW + 20_000)
-    assert _obligation(conn) == "OPEN"
 
 
 def test_funding_funded_does_not_move_the_transfer():

@@ -107,6 +107,8 @@ def execute_fx_quote(
         found = _lookup_conversion(client, request_id)
         if found is None or not found.conversion_id:
             raise FxQuoteError("in_flight")
+        if (found.quote_id or "") != str(terms.quote_id):  # unbound or foreign candidate: no state write
+            raise FxQuoteError("quote")
         return _finish_conversion(conn, intent, str(terms.quote_id), approval_id, found)
     quote = conn.execute("SELECT * FROM fx_quote WHERE quote_id = ?", (terms.quote_id,)).fetchone()
     if quote is None:

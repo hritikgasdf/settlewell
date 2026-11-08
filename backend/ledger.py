@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS webhook_event (
     signature_ok INTEGER NOT NULL,
     processed_at TEXT
 );
+CREATE TABLE IF NOT EXISTS webhook_state (
+    transfer_airwallex_id TEXT PRIMARY KEY,
+    latest_event_ts_ms INTEGER NOT NULL,
+    latest_status TEXT NOT NULL,
+    settle_until_ms INTEGER NOT NULL,
+    event_id TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fx_quote (
     id INTEGER PRIMARY KEY,
     quote_id TEXT NOT NULL UNIQUE,
@@ -203,6 +210,7 @@ MODEL_TABLES = frozenset(
         "approval",
         "proof_document",
         "webhook_event",
+        "webhook_state",
         "fx_quote",
         "balance_snapshot",
         "payout_funding",
