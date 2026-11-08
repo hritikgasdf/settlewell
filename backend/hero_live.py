@@ -154,7 +154,9 @@ class Hero:
         self.save()  # durable BEFORE the remote send
         return req
 
-    def _ben(self, name: str, body: dict) -> str:
+    def _seed_ben(self, name: str, body: dict) -> str:
+        """SCENARIO WORLD SETUP ONLY (prerequisite original beneficiary). Not a Settlewell action."""
+        self.driver.require_sandbox()
         req = self._req(name)
         found = self.client.find_beneficiary(req)
         if found is not None:
@@ -162,13 +164,15 @@ class Hero:
         else:
             if not self.client.validate_beneficiary(body).ok:
                 raise HeroError("beneficiary_invalid")
-            bid = self.driver.create_owned_beneficiary({**body, "request_id": req}).id
+            bid = self.driver.seed_world_beneficiary({**body, "request_id": req}).id
         self.m["beneficiaries"][bid] = name
         self.m["ids"][name + "_ben"] = bid
         self.save()
         return bid
 
-    def _transfer(self, name: str, ben: str, *, future: bool):
+    def _seed_transfer(self, name: str, ben: str, *, future: bool):
+        """SCENARIO WORLD SETUP ONLY (original payment, colleague duplicate). Not a Settlewell action."""
+        self.driver.require_sandbox()
         req = self._req(name)
         items = self.client.list_transfers(request_id=req).items
         found = next((t for t in items if t.request_id == req), None)  # exact ownership only
@@ -180,7 +184,7 @@ class Hero:
             }
             if future:
                 kwargs["transfer_date"] = (datetime.now(UTC) + timedelta(days=3)).date().isoformat()
-            found = self.driver.create_owned_transfer(**kwargs)
+            found = self.driver.seed_world_transfer(**kwargs)
         self.m["transfers"][found.id] = found.status
         self.m["ids"][name] = found.id
         self.save()
@@ -211,17 +215,26 @@ class Hero:
         return execute(self.conn, self.client, intent_id, as_of=self.now()).remote_id
 
     # ---- stages ----
-    def _bootstrap(self) -> str:
+    def seed_scenario_world(self):
+        """Sandbox-only pre-existing world: old beneficiary, original SENT payment, colleague duplicate.
+
+        Refuses outside the confirmed sandbox BEFORE any remote write. Settlewell actions (duplicate
+        cancel, new-bank beneficiary, replacement) are never created here; they go through execute()."""
+        self.driver.require_sandbox()
         self.m["ids"].setdefault("ref", f"INV-{self.m['run']}")
-        old = self._ben("old", OLD_BANK)
-        orig = self._transfer("orig", old, future=False)
+        old = self._seed_ben("old", OLD_BANK)
+        orig = self._seed_transfer("orig", old, future=False)
         if orig.status != "SENT":
             orig = self.driver.reach(orig.id, "SENT")
         if orig.status != "SENT":
             raise HeroError("original_not_sent")
-        dup = self._transfer("dup", old, future=True)
+        dup = self._seed_transfer("dup", old, future=True)
         if dup.status != "SCHEDULED":
             raise HeroError("duplicate_not_scheduled")
+        return orig, dup, old
+
+    def _bootstrap(self) -> str:
+        orig, _dup, old = self.seed_scenario_world()
         if "obligation_row" not in self.m["ids"]:
             self._seed(orig, old)
         self.m["transfers"][orig.id] = "SENT"

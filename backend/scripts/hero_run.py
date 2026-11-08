@@ -107,6 +107,43 @@ def _ledger_owned_requests(manifest: dict, manifest_path: str) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _cancel_via_execute(manifest: dict, manifest_path: str, client, transfer_id: str) -> None:
+    """Settlewell's own cancellation: a bound single-use approved STOP_DUPLICATE through execute().
+
+    Needs the run's bound ledger holding a transfer_record and incident for this id; otherwise it
+    raises and reset fails closed. Never a raw remote cancel."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
+    from backend.execute import execute, intent_terms, open_intent
+    from backend.ledger import connect
+
+    db = _bound_db(manifest, manifest_path)
+    if db is None:
+        raise RuntimeError("cancel_needs_bound_ledger")
+    conn = connect(str(db))
+    try:
+        row = conn.execute("SELECT * FROM transfer_record WHERE airwallex_id = ?", (transfer_id,)).fetchone()
+        inc = conn.execute("SELECT id FROM incident WHERE obligation_id = ? ORDER BY id DESC LIMIT 1",
+                           (row["obligation_id"],)).fetchone() if row is not None else None
+        if row is None or inc is None:
+            raise RuntimeError("cancel_needs_recorded_transfer")
+        now = datetime.now(UTC)
+        intent = open_intent(
+            conn, kind="cancel", incident_id=int(inc["id"]), obligation_id=row["obligation_id"],
+            action="STOP_DUPLICATE", amount=str(row["amount"]), currency=str(row["currency"]),
+            beneficiary_id=client.get_transfer(transfer_id).beneficiary_id or "",
+            details_hash=row["details_hash"] or "", target_id=str(row["id"]), proposer=AP_CLERK,
+            expires_at=(now + timedelta(hours=2)).isoformat(), created_at=now.isoformat())
+        approval_id = conn.execute("SELECT approval_id FROM execution_intent WHERE id = ?",
+                                   (intent.id,)).fetchone()["approval_id"]
+        approve(conn, approval_id, intent_terms(conn, intent.id), approver=FINANCE_APPROVER,
+                used_at=now.isoformat())
+        execute(conn, client, intent.id, as_of=now.isoformat())
+    finally:
+        conn.close()
+
+
 def reset_owned(manifest_path: str, client, driver) -> tuple[bool, list[str]]:
     """Release/cancel only transfers owned by this run's request ids; refuse on anything unresolved,
     foreign or unbound. Transfers are found by manifest id AND exact request-id lookup, so a crash
@@ -130,7 +167,7 @@ def reset_owned(manifest_path: str, client, driver) -> tuple[bool, list[str]]:
             if current.status == "SENT":
                 driver.release_sent(transfer_id)
             elif current.status == "SCHEDULED":
-                client.cancel_transfer(transfer_id)
+                _cancel_via_execute(manifest, manifest_path, client, transfer_id)
             current = client.get_transfer(transfer_id)  # readback
             if (current.status or "") in UNRESOLVED:
                 problems.append(f"{transfer_id}:{current.status}")

@@ -29,6 +29,7 @@ Read this table before any claim in the README, the plan or a recording.
 | User authentication | **None.** The console has no login. Writes need a loopback Host, an allowed Origin and a per-process CSRF token. Approver identities are demo labels | MOCK |
 | Replay (`/replay`) | **MOCK.** Canned statuses, letter, `PAYOUT_REVERSAL` and quote rate | MOCK |
 | 30-incident eval and runner | **Offline MOCK.** No Airwallex call, no secrets | MOCK |
+| Hero scenario world setup | **Sandbox-only seed** (`Hero.seed_scenario_world`): only the pre-existing world is created directly: prerequisite original beneficiary, original payment, colleague duplicate. It refuses outside the confirmed sandbox before any remote write. Every Settlewell action (duplicate cancel, new-bank beneficiary, replacement, FX, and any cancel done by `--reset`) runs through `execute()` with a bound single-use approval. Simulated bank outcomes (`SandboxDriver` SENT/return) are scenario stimuli, not app actions | SANDBOX only; never MOCK or production |
 | Sandbox React console/API | **Live adapter wired**. HTTP outreach approval verified; replacement and FX executed by hero through the same execution boundary, not clicked in the browser | SANDBOX banner; local-only demo identities |
 
 ## Historical sandbox run (not current evidence)

@@ -150,6 +150,23 @@ def test_reset_refuses_foreign_ids_and_keeps_everything(tmp_path):
     assert not ok and problems == ["tr_x:foreign"] and driver.released == [] and db.exists()
 
 
+def test_reset_scheduled_without_ledger_never_raw_cancels(tmp_path):
+    path = str(tmp_path / "m.json")
+    db = _run_db(tmp_path)
+    hero_run.save_manifest(path, {"transfers": {"tr_owned": "SCHEDULED"}, "requests": {"dup": "req_owned"},
+                                  "run": "12345678", "db": str(db)})
+    cancelled = []
+
+    class _C(_Client):
+        def cancel_transfer(self, tid):
+            cancelled.append(tid)
+
+    client = _C("SCHEDULED")
+    client.status = "SCHEDULED"
+    ok, problems = hero_run.reset_owned(path, client, _Driver(client, "SCHEDULED"))
+    assert not ok and cancelled == [] and problems and problems[0].startswith("tr_owned:") and db.exists()
+
+
 def test_reset_demo_wrapper_refuses_account_wide(capsys):
     from backend.scripts import reset_demo
 

@@ -104,20 +104,25 @@ class SandboxDriver:
         self._attempts = attempts
         self._confirm = confirm_sandbox
 
-    def _require_hero(self) -> None:
-        """Owned fixtures only: explicit confirm, the exact sandbox host, an approved entrypoint."""
+    def require_sandbox(self) -> None:
+        """Explicit confirm and the exact sandbox host. Checked before any remote write."""
         if not self._confirm or getattr(self._client, "_base_url", None) != SANDBOX_BASE:
             raise SandboxContractError()
+
+    def _require_hero(self) -> None:
+        """Owned fixtures only: explicit confirm, the exact sandbox host, an approved entrypoint."""
+        self.require_sandbox()
         for frame in inspect.stack():
             if frame.frame.f_globals.get("__name__", "") in HERO_MODULES:
                 return
         raise SandboxContractError()
 
-    def create_owned_beneficiary(self, body):
+    # Scenario-world setup ONLY (hero_live.seed_scenario_world). Never a Settlewell action.
+    def seed_world_beneficiary(self, body):
         self._require_hero()
         return self._client.create_beneficiary(body)
 
-    def create_owned_transfer(self, **kwargs) -> Transfer:
+    def seed_world_transfer(self, **kwargs) -> Transfer:
         self._require_hero()
         return self._client.create_transfer(**kwargs)
 

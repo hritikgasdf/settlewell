@@ -81,10 +81,78 @@ def test_runtime_failure_is_sanitized_not_faked(tmp_path):
 def test_driver_creates_refuse_without_confirm_or_wrong_host():
     remote = Remote()
     with pytest.raises(SandboxContractError):
-        SandboxDriver(remote).create_owned_transfer(transfer_amount=Decimal(1))
+        SandboxDriver(remote).seed_world_transfer(transfer_amount=Decimal(1))
     remote._base_url = "https://api.airwallex.com"
     with pytest.raises(SandboxContractError):
-        SandboxDriver(remote, confirm_sandbox=True).create_owned_beneficiary({})
+        SandboxDriver(remote, confirm_sandbox=True).seed_world_beneficiary({})
+
+
+def test_seed_scenario_world_refuses_outside_sandbox_before_any_remote_write(tmp_path):
+    remote = Remote()
+    remote._base_url = "https://api.airwallex.com"
+    writes = []
+    remote.create_beneficiary = lambda *a, **k: writes.append("ben")
+    remote.create_transfer = lambda *a, **k: writes.append("transfer")
+    for confirm, host in ((True, "https://api.airwallex.com"), (False, SANDBOX_BASE)):
+        remote._base_url = host
+        hero = Hero(remote, SandboxDriver(remote, confirm_sandbox=confirm), str(tmp_path / f"{confirm}.json"),
+                    str(tmp_path / f"{confirm}.db"), complete=mock_complete, sleep=lambda _s: None)
+        with pytest.raises(SandboxContractError):
+            hero.seed_scenario_world()
+        assert writes == [] and remote.posts == []
+
+
+def test_reset_cancels_scheduled_duplicate_only_through_approved_execute(tmp_path, monkeypatch):
+    import backend.scripts.hero_run as hr
+    from backend.paid_once import scan_paid_once
+
+    remote = Remote()
+    hero = _hero(tmp_path, remote)
+    hero._bootstrap()
+    scan_paid_once(hero.conn, remote, int(hero.m["ids"]["obligation_row"]))
+    hero.conn.close()
+    raw = []
+    real_cancel = remote.cancel_transfer
+    monkeypatch.setattr(remote, "cancel_transfer", lambda tid, *a, **k: (raw.append(tid), real_cancel(tid, *a, **k))[1])
+    import backend.execute as ex
+
+    seen = []
+    real_exec = ex.execute
+    monkeypatch.setattr(ex, "execute", lambda c, cl, i, *, as_of: (seen.append(i), real_exec(c, cl, i, as_of=as_of))[1])
+    ok, problems = hr.reset_owned(str(tmp_path / "m.json"), remote, SandboxDriver(remote, confirm_sandbox=True))
+    assert ok, problems
+    assert len(seen) == 1  # the cancel ran through execute (which is the only caller of the remote cancel)
+    assert raw == [hero.m["ids"]["dup"]]  # remote cancel reached only from inside execute, for the owned dup
+
+
+def test_hero_settlewell_actions_run_through_execute_with_bound_approvals(tmp_path, monkeypatch):
+    import backend.hero_live as hl
+
+    calls = []
+    real = hl.execute
+
+    def spy(conn, client, intent_id, *, as_of):
+        row = conn.execute(
+            "SELECT e.kind, e.approval_id, a.approver, a.proposer FROM execution_intent e "
+            "JOIN approval a ON a.id = e.approval_id WHERE e.id = ?", (intent_id,)).fetchone()
+        calls.append((row["kind"], bool(row["approver"]), row["approver"] != row["proposer"]))  # approved by someone else
+        return real(conn, client, intent_id, as_of=as_of)
+
+    monkeypatch.setattr(hl, "execute", spy)
+    remote = Remote()
+    seeds = []
+    hero = _hero(tmp_path, remote)
+    for name in ("seed_world_beneficiary", "seed_world_transfer"):
+        orig = getattr(hero.driver, name)
+        monkeypatch.setattr(hero.driver, name, lambda *a, _o=orig, _n=name, **k: (seeds.append(_n), _o(*a, **k))[1])
+    result = hero.run()
+    assert all(v.startswith(("PASS", "PARTIAL")) for v in result.values()), result
+    kinds = [c[0] for c in calls]
+    assert {"cancel", "beneficiary", "replacement"} <= set(kinds), kinds
+    assert all(approved and different for _k, approved, different in calls), calls
+    # Only the pre-existing world is seeded: old beneficiary, original, duplicate. Nothing else is created directly.
+    assert seeds == ["seed_world_beneficiary", "seed_world_transfer", "seed_world_transfer"], seeds
+    assert remote.ben_posts == 2  # old (seed) + new bank (execute)
 
 
 def _iban_mod97(iban: str) -> bool:
