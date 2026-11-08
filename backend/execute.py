@@ -117,7 +117,7 @@ def open_intent(
     created_at: str,
 ) -> IntentRef:
     """Persist the intent and the approval proposal. Does not call Airwallex."""
-    if kind not in {"replacement", "fx_conversion", "beneficiary", "cancel"}:
+    if kind not in {"replacement", "fx_conversion", "beneficiary", "cancel", "outreach"}:
         raise ExecuteError("kind")
     if obligation_id is None:
         raise ExecuteError("obligation")
@@ -171,7 +171,13 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
         raise ExecuteError("refused")
     if intent["state"] == "executed":
         return _resume(conn, client, intent, as_of)
-    _ready(conn, intent, as_of)
+    try:
+        _ready(conn, intent, as_of)
+    except ExecuteError as error:
+        if error.code == "void":
+            # Changed terms void the grant for good: restoring them must not revive it.
+            _refuse(conn, intent, "intent_voided", "terms changed after approval", as_of)
+        raise
     if intent["kind"] in ("replacement", "fx_conversion"):
         from backend.webhooks import obligation_pending
 
@@ -223,6 +229,10 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
         if not stopped.cancelled:
             raise ExecuteError("status_" + stopped.status)
         return ExecuteResult("cancel", str(intent["target_id"]), stopped.status)
+    if intent["kind"] == "outreach":  # non-money: queue a message in the outbox, send nothing
+        from backend.incident_outreach import run_outreach
+
+        return ExecuteResult("outreach", *run_outreach(conn, client, intent, as_of))
     raise ExecuteError("kind")
 
 
@@ -416,6 +426,10 @@ def _resume(conn, client, intent, as_of: str) -> ExecuteResult:
             str(intent["remote_id"]),
             intent["remote_status"] or "recovered",
         )
+    if intent["kind"] == "outreach":
+        from backend.incident_outreach import run_outreach
+
+        return ExecuteResult("outreach", *run_outreach(conn, client, intent, as_of))
     if intent["kind"] == "beneficiary":
         return _execute_beneficiary(conn, client, intent, as_of)
     if intent["kind"] == "cancel":

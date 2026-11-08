@@ -137,3 +137,64 @@ def test_an_fx_quote_can_be_consumed_only_once():
     consume_fx_quote(conn, "quo_1", "con_1")
     with pytest.raises(LedgerError):
         consume_fx_quote(conn, "quo_1", "con_2")
+
+
+def test_old_db_with_narrow_intent_check_migrates_without_losing_rows(tmp_path):
+    from backend.execute import open_intent
+    from backend.ledger import SCHEMA, migrate
+
+    path = tmp_path / "old.db"
+    old = connect(path)
+    incident_id = seed_hero(old)
+    obligation_id = old.execute("SELECT obligation_id FROM incident WHERE id = ?", (incident_id,)).fetchone()[0]
+    ref = open_intent(
+        old, kind="replacement", incident_id=incident_id, obligation_id=obligation_id,
+        action="REPLACE", amount="4200.00", currency="EUR", beneficiary_id="b-1",
+        details_hash="h" * 8, proposer="alice", quote_id="q-1", created_at="2026-01-01T00:00:00+00:00",
+        expires_at="2026-01-02T00:00:00+00:00",
+    )
+    old.execute(
+        "INSERT INTO payout_funding (request_id, intent_id, incident_id, obligation_id, currency, amount, "
+        "fee_budget, fee_currency, fee_source, reserve_floor, available_before, state, hold_state, "
+        "after_state, created_at) VALUES ('r-1', ?, ?, ?, 'EUR', '4200.00', '13.47', 'EUR', 'test', '0', "
+        "'9000', 'ACCEPTED', 'HELD', 'PENDING', '2026-01-01')",
+        (ref.id, incident_id, obligation_id),
+    )
+    old.commit()
+    # Downgrade only execution_intent to the pre-outreach CHECK, as an old persisted DB has it.
+    old_sql = SCHEMA.split("CREATE TABLE IF NOT EXISTS execution_intent", 1)[1].split(");", 1)[0]
+    old_sql = old_sql.replace(", 'outreach'", "")
+    old.execute("CREATE TABLE execution_intent_old" + old_sql + ")")
+    old.execute("INSERT INTO execution_intent_old SELECT * FROM execution_intent")
+    old.execute("DROP TABLE execution_intent")
+    old.execute("ALTER TABLE execution_intent_old RENAME TO execution_intent")
+    old.commit()
+    with pytest.raises(Exception, match="CHECK"):
+        old.execute(
+            "INSERT INTO execution_intent (kind, action, amount, currency, beneficiary_id, details_hash, "
+            "state, created_at) VALUES ('outreach', 'x', '0', 'EUR', 's', 'h', 'proposed', 'now')"
+        )
+    old.rollback()
+    before_intents = [tuple(r) for r in old.execute("SELECT * FROM execution_intent ORDER BY id")]
+    before_approvals = [tuple(r) for r in old.execute("SELECT * FROM approval ORDER BY id")]
+    before_funding = [tuple(r) for r in old.execute("SELECT * FROM payout_funding")]
+    old.close()
+
+    conn = connect(path)
+    migrate(conn)
+    migrate(conn)  # idempotent
+    assert [tuple(r) for r in conn.execute("SELECT * FROM execution_intent ORDER BY id")] == before_intents
+    assert [tuple(r) for r in conn.execute("SELECT * FROM approval ORDER BY id")] == before_approvals
+    assert [tuple(r) for r in conn.execute("SELECT * FROM payout_funding")] == before_funding
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert not conn.execute("SELECT name FROM sqlite_master WHERE name = 'execution_intent_new'").fetchall()
+    fresh = open_intent(
+        conn, kind="outreach", incident_id=incident_id, obligation_id=obligation_id,
+        action="REPLY_WAIT", amount="0", currency="EUR", beneficiary_id="supplier:1",
+        details_hash="d" * 8, proposer="alice", created_at="2026-01-01T00:00:00+00:00",
+        expires_at="2026-01-02T00:00:00+00:00",
+    )
+    assert fresh.id > ref.id
+    old_row = conn.execute("SELECT state, approval_id FROM execution_intent WHERE id = ?", (ref.id,)).fetchone()
+    assert old_row["state"] == "proposed" and old_row["approval_id"] is not None

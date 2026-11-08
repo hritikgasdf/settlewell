@@ -55,6 +55,21 @@ SETTLEWELL_MOCK=1 uv run python -m backend.scripts.eval_harness
 
 That prints one line per incident and then `30/30`. Without `SETTLEWELL_MOCK=1` it prints `eval skipped`.
 
+Run the P1-7 incident runner over the 30-incident catalog:
+
+```
+SETTLEWELL_MOCK=1 uv run python -m backend.incidents --all
+```
+
+- It is offline MOCK only. It calls no Airwallex endpoint and reads no secrets. A PASS row needs a scenario whose assertions all hold, run through claim, pinned match, decision, intent, approval, `execute` and reconcile against the stateful mock remote. A row still on a legacy fixture is `PARTIAL`.
+- Exit code: `0` only when every row is `PASS`. Any `PARTIAL`, `FAIL` or `STUB` row makes it exit `1`. `2` means the `--all` flag was missing.
+- Output: a markdown table with columns `#`, Title, Status, Expected, Observed, Transfers out and Notes, then a count line. The same table is written to `/workspace/settlewell-ctx/incidents-table.md` when that directory exists on the machine.
+- Non-money replies (wait, proof, cancelled, TRACE, escalation) are `outreach` intents: propose, single-use approval bound to recipient and body hash, then `execute`. The effect is a queued outbox row and an audit row. Nothing is delivered. An old DB gets the new `execution_intent` kind CHECK by an in-place, row-preserving rebuild on open; no reset is needed.
+- Not plan-specified, assumed: LLM confidence threshold 0.8 and TRACE minimum SENT age 7 days (fixture 14 days). A claim with no `confidence` is accepted as legacy and is not escalated. Escalation does not change `incident.state`.
+- #14: the plan label is `LOOKUP_KEEP_IN_FLIGHT`. The table's Observed shows the held-unknown phase (asserted before recovery: no second POST, no remote id, incident not closed) and then `LOOKUP_RECOVER_BY_REQUEST_ID`. The labels differ by design.
+- #28 with no pinned supplier has no incident, so it is an early refusal and is not routed through `execute`. The STANDARD cancelled letter comes from the stateful remote stand-in and is not stored in `proof_document`.
+- The default demo client is cancel-only. The API replacement and FX paths are covered only through `client_factory` with a stateful fake, not by the demo client.
+
 `uv run pytest` runs the unit tests with no network and no secrets. `uv run ruff check .` is the lint.
 
 Copy `.env.example` to `.env` if you want a local note of the variable names. The process reads the environment itself. `.env` is gitignored. Put values only in the environment, never in the repo. The mock console and the eval do not need those variables.
@@ -62,6 +77,8 @@ Copy `.env.example` to `.env` if you want a local note of the variable names. Th
 ## Local demo API (MOCK only)
 
 `uv run python -m backend.api` serves a JSON API on 127.0.0.1:8765 over a persisted SQLite demo DB (`var/settlewell.db`, seeded once). Approve, reject and cancel all run through `backend.execute`. Writes need a loopback Host, an allowed Origin and the CSRF token from `GET /api/session`, and work only in MOCK mode. There is no production authentication. Contract: `settlewell-ctx/p15-api-contract.md`.
+
+Seeded demo (new DB only): INV-2291 has a claim parsed offline by the real `claims.parse_email` with a mock completer, and the supplier identity is pinned from the obligation, not the email. The claim is shown as `matched` only when the parse matched the pinned supplier. The INV-2291 proof is one generated MOCK / SYNTHETIC PDF stored in `proof_blob`, labelled `MOCK / SYNTHETIC - not Airwallex proof, no bank or network confirmation`. `GET /api/incidents/{id}/proof/{document_id}/pdf` serves those bytes only when the document's transfer is the live one, no webhook settle window is pending, the local and remote statuses allow a proof (SENT or PAID), and the stored hash matches. Otherwise it returns a JSON refusal with `gate_code`. Real `issue_proof` rows have no stored bytes and are never linked. An existing `var/settlewell.db` is not reseeded or rewritten: an old DB keeps no claim and no PDF until you delete it. The API replacement and FX tests use `client_factory` with a stateful fake remote. The default demo client implements only `get_transfer` and `cancel_transfer`, so a replacement or FX intent against it is refused, not sent.
 
 ### Webhooks and the periodic worker (local MOCK scope)
 
@@ -102,7 +119,7 @@ npm run build      # tsc --noEmit, then vite build into frontend/dist
 npm run preview    # serves frontend/dist on 127.0.0.1:5173; the backend must still be running
 ```
 
-Limits: this is a local demo. The console has no login, and writes are accepted only when the backend runs in MOCK mode with an allowed Origin and the per-process CSRF token. The seeded demo is a `STOP_DUPLICATE` cancel, not a replacement. Proof PDFs are not available in this build. The seeded claim is absent. Only the cancel path is exercised end to end. To reset the demo, stop the backend and delete `var/settlewell.db`. Details: `settlewell-ctx/p15-ui-completion.md`.
+Limits: this is a local demo. The console has no login, and writes are accepted only when the backend runs in MOCK mode with an allowed Origin and the per-process CSRF token. The seeded demo is a `STOP_DUPLICATE` cancel, not a replacement. The seeded demo has one MOCK / SYNTHETIC proof PDF, linked only while its status gate passes, and it is not Airwallex proof. The seeded claim is shown as matched to the pinned supplier. Only the cancel path is exercised end to end. To reset the demo, stop the backend and delete `var/settlewell.db`. Details: `settlewell-ctx/p15-ui-completion.md`.
 
 ## No-LLM baseline
 

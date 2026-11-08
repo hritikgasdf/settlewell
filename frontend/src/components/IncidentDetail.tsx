@@ -67,8 +67,25 @@ function ClaimView({ claim }: { claim: Record<string, unknown> }) {
   );
 }
 
-function isSafeLink(link: string): boolean {
-  return /^https?:\/\//.test(link);
+// Only the API's own same-origin proof route. Rejects protocol-relative (//), absolute, javascript:, data: and anything else.
+const SAFE_PROOF_URL = /^\/api\/incidents\/\d+\/proof\/\d+\/pdf$/;
+
+function isSafeProofUrl(link: string): boolean {
+  return SAFE_PROOF_URL.test(link) && !link.startsWith('//');
+}
+
+const REFUSAL_TEXT: Record<string, string> = {
+  no_stored_bytes: 'no stored PDF bytes',
+  hash_mismatch: 'stored bytes fail the hash check',
+  not_live_transfer: 'this is not the live transfer',
+  webhook_pending: 'a webhook settle window is still open',
+  status_not_eligible: 'the current status does not allow a proof',
+  remote_unknown: 'the remote status could not be read',
+};
+
+function refusalText(code: string | null): string {
+  if (code === null) return 'eligible';
+  return `withheld: ${REFUSAL_TEXT[code] ?? code}`;
 }
 
 export function IncidentDetailPanel(props: Props) {
@@ -99,6 +116,7 @@ export function IncidentDetailPanel(props: Props) {
   const pinnedId = d.pinned_bank ? d.pinned_bank.id : null;
   const hasFunding = d.funding.payouts.length > 0 || d.funding.balances.length > 0;
   const pdfLink = d.proof.pdf_link;
+  const linkedDoc = pdfLink !== null ? d.proof.documents.find((doc) => doc.pdf_url === pdfLink) ?? null : null;
 
   return (
     <div className="detail">
@@ -128,7 +146,14 @@ export function IncidentDetailPanel(props: Props) {
 
       <Card id="claim-title" title="Claim">
         {d.incident.claim !== null ? (
-          <ClaimView claim={d.incident.claim} />
+          <>
+            {d.incident.evidence.claim_matched ? (
+              <p className="small">
+                <Pill tone="accent">Matched pinned claim</Pill>
+              </p>
+            ) : null}
+            <ClaimView claim={d.incident.claim} />
+          </>
         ) : (
           <Empty>
             No claim is recorded for this incident (claim parser not run). Evidence:{' '}
@@ -229,15 +254,29 @@ export function IncidentDetailPanel(props: Props) {
       </Card>
 
       <Card id="proof-title" title="Proof">
-        {pdfLink !== null && isSafeLink(pdfLink) ? (
+        {pdfLink !== null && isSafeProofUrl(pdfLink) ? (
           <p>
             <a href={pdfLink} target="_blank" rel="noopener noreferrer">
               Open proof PDF
-            </a>
+            </a>{' '}
+            <span className="small muted">{linkedDoc?.label ?? 'Label unavailable. Do not treat as Airwallex proof.'}</span>
           </p>
         ) : (
-          <p className="small">No proof PDF is available. {d.proof.reason}</p>
+          <p className="small">No proof PDF is available. {d.proof.reason ?? 'No stored document is currently eligible.'}</p>
         )}
+        {d.proof.documents.length > 0 ? (
+          <ul className="plain-list small">
+            {d.proof.documents.map((doc) => (
+              <li key={doc.id}>
+                Document {doc.id} ({doc.format}, status at issue {doc.status_at_issue}): {refusalText(doc.refusal)}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <p className="small muted">
+          Stored proof is a MOCK / SYNTHETIC demo document. It is not Airwallex proof and not bank or network confirmation. If the status
+          changed after this page loaded, the link can return an error; reload the incident.
+        </p>
       </Card>
 
       <Card id="proposals-title" title="Proposals">
