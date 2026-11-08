@@ -151,12 +151,12 @@ def test_reset_command_does_not_print_credentials(monkeypatch, capsys, tmp_path)
     monkeypatch.setenv("AIRWALLEX_SANDBOX_CLIENT_ID", "client-id")
     monkeypatch.delenv("SETTLEWELL_SANDBOX", raising=False)
     monkeypatch.delenv("AIRWALLEX_BASE_URL", raising=False)
-    code = main(["--db", str(tmp_path / "ledger.db")])
+    manifest = str(tmp_path / "manifest.json")
+    code = main(["--db", str(tmp_path / "ledger.db"), "--manifest", manifest])
     out = capsys.readouterr().out
     assert code == 0
     assert "super-secret-key" not in out
     assert "client-id" not in out
-    assert "reset_supplier pass" in out
-    assert "reset_sent pass" in out
-    again = main(["--db", str(tmp_path / "ledger.db")])
+    assert "reset mock: manifest removed" in out
+    again = main(["--db", str(tmp_path / "ledger.db"), "--manifest", manifest])
     assert again == 0

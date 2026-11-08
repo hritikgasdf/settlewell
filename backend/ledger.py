@@ -227,10 +227,28 @@ class LedgerError(Exception):
     """A ledger rule rejected the write."""
 
 
+PROOF_BLOB = """
+CREATE TABLE IF NOT EXISTS proof_blob (
+    proof_document_id INTEGER PRIMARY KEY REFERENCES proof_document(id),
+    content BLOB NOT NULL,
+    sha256 TEXT NOT NULL,
+    media_type TEXT NOT NULL DEFAULT 'application/pdf',
+    origin TEXT NOT NULL,
+    label TEXT NOT NULL
+);
+"""
+
+
+def ensure_proof_blob(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: proof byte storage exists in every ledger, seeded or not."""
+    conn.execute(PROOF_BLOB)
+
+
 def connect(path: str | Path = ":memory:") -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    ensure_proof_blob(conn)
     return conn
 
 

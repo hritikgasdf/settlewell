@@ -89,11 +89,55 @@ def _require_contract_script() -> None:
     raise SandboxContractError()
 
 
+# Safe contract trace (stage, request id, object id, accepted yes/no/unknown). No bodies or credentials.
+LAST_TRACE: dict[str, str] = {}
+
+SANDBOX_BASE = "https://api-demo.airwallex.com"
+HERO_MODULES = ("backend.hero_live", "backend.scripts.hero_run")
+
+
 class SandboxDriver:
-    def __init__(self, client, *, sleep: Sleeper | None = None, attempts: int = 8) -> None:
+    def __init__(self, client, *, sleep: Sleeper | None = None, attempts: int = 8,
+                 confirm_sandbox: bool = False) -> None:
         self._client = client
         self._sleep = sleep or _noop
         self._attempts = attempts
+        self._confirm = confirm_sandbox
+
+    def require_sandbox(self) -> None:
+        """Explicit confirm and the exact sandbox host. Checked before any remote write."""
+        if not self._confirm or getattr(self._client, "_base_url", None) != SANDBOX_BASE:
+            raise SandboxContractError()
+
+    def _require_hero(self) -> None:
+        """Owned fixtures only: explicit confirm, the exact sandbox host, an approved entrypoint."""
+        self.require_sandbox()
+        for frame in inspect.stack():
+            if frame.frame.f_globals.get("__name__", "") in HERO_MODULES:
+                return
+        raise SandboxContractError()
+
+    # Scenario-world setup ONLY (hero_live.seed_scenario_world). Never a Settlewell action.
+    def seed_world_beneficiary(self, body):
+        self._require_hero()
+        return self._client.create_beneficiary(body)
+
+    def seed_world_transfer(self, **kwargs) -> Transfer:
+        self._require_hero()
+        return self._client.create_transfer(**kwargs)
+
+    def reach(self, transfer_id: str, status: str) -> Transfer:
+        self._require_hero()
+        return self._reach(transfer_id, status)
+
+    def fail_account_closed(self, transfer_id: str) -> Transfer:
+        """Simulate the bank return on an owned SENT transfer; poll until CANCELLED/90701."""
+        self._require_hero()
+        self.transition(transfer_id, "FAILED", "ACCOUNT_CLOSED")
+        return self._until(transfer_id, _account_closed)
+
+    def reversal_joined(self, transfer_id: str, currency: str) -> bool:
+        return self._reversal_joined(transfer_id, currency)
 
     def list_remote_sent(self) -> list[str]:
         """List sandbox transfers at SENT. Stops after a fixed number of pages."""
@@ -148,16 +192,24 @@ class SandboxDriver:
         request_id: str,
     ) -> ContractResult:
         _require_contract_script()
-        created = self._client.create_transfer(
-            transfer_amount=transfer_amount,
-            transfer_currency=transfer_currency,
-            source_currency=source_currency,
-            beneficiary_id=beneficiary_id,
-            transfer_method=transfer_method,
-            reference=reference,
-            reason=reason,
-            request_id=request_id,
-        )
+        LAST_TRACE.clear()
+        LAST_TRACE.update(stage="create_transfer", request_id=request_id, accepted="unknown")
+        try:
+            created = self._client.create_transfer(
+                transfer_amount=transfer_amount,
+                transfer_currency=transfer_currency,
+                source_currency=source_currency,
+                beneficiary_id=beneficiary_id,
+                transfer_method=transfer_method,
+                reference=reference,
+                reason=reason,
+                request_id=request_id,
+            )
+        except AirwallexError:
+            created = self._recover_created(request_id)  # never a second create
+            if created is None:
+                raise
+        LAST_TRACE.update(accepted="yes", transfer_id=created.id, stage="reach_sent")
         sent = self._reach(created.id, "SENT")
         try:
             self.transition(created.id, "FAILED", "ACCOUNT_CLOSED")
@@ -177,6 +229,16 @@ class SandboxDriver:
             letter_bytes=len(letter.content),
             reversal_joined=self._reversal_joined(created.id, transfer_currency),
         )
+
+    def _recover_created(self, request_id: str):
+        """After an error on create, read by our request id. Exact match only; unreadable stays unknown."""
+        try:
+            items = self._client.list_transfers(request_id=request_id).items
+        except AirwallexError:
+            return None
+        found = next((t for t in items if t.request_id == request_id and t.id), None)
+        LAST_TRACE["accepted"] = "yes" if found else "no"
+        return found
 
     def _reach(self, transfer_id: str, status: str) -> Transfer:
         current = self.transition(transfer_id, status)
@@ -229,6 +291,9 @@ def run_contract_cli() -> int:
     except AirwallexError as error:
         print("contract_error_status", error.status_code)
         print("contract_error_code", error.code or "none")
+        for key in ("stage", "request_id", "transfer_id", "accepted"):
+            if LAST_TRACE.get(key):
+                print("contract_trace", key, LAST_TRACE[key])
         print("contract fail")
         return 1
     print("saw_sent", "pass" if result.saw_sent else "fail")

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import asdict
 
 from backend.claims import HERO_EMAIL, mock_complete, parse_email
+from backend.ledger import PROOF_BLOB  # noqa: F401 - schema re-export
 from backend.policy import decide
 from backend.webhooks import obligation_pending
 
@@ -19,16 +21,6 @@ MOCK_FORMAT = "MOCK_SYNTHETIC"
 MOCK_LABEL = "MOCK / SYNTHETIC - not Airwallex proof, no bank or network confirmation"
 PDF_MEDIA_TYPE = "application/pdf"
 
-PROOF_BLOB = """
-CREATE TABLE IF NOT EXISTS proof_blob (
-    proof_document_id INTEGER PRIMARY KEY REFERENCES proof_document(id),
-    content BLOB NOT NULL,
-    sha256 TEXT NOT NULL,
-    media_type TEXT NOT NULL DEFAULT 'application/pdf',
-    origin TEXT NOT NULL,
-    label TEXT NOT NULL
-);
-"""
 
 
 def pdf_url(incident_id: int, document_id: int) -> str:
@@ -98,9 +90,26 @@ def _allowed(status: str | None) -> bool:
     return bool(status) and decide(str(status), claim="proof").proof_allowed
 
 
+def _current_replacement(conn, obligation_id: int, record_id: int) -> bool:
+    """True only for the record produced by this obligation's LATEST executed replacement intent.
+
+    The obligation's live_transfer_id stays the immutable original anchor; ownership is proved by the
+    durable intent (same obligation, executed, same remote id and request id), never by the record alone."""
+    intent = conn.execute(
+        "SELECT remote_id, request_id FROM execution_intent WHERE kind = 'replacement' AND state = 'executed' "
+        "AND obligation_id = ? AND remote_id IS NOT NULL ORDER BY id DESC LIMIT 1", (obligation_id,)).fetchone()
+    record = conn.execute("SELECT * FROM transfer_record WHERE id = ?", (record_id,)).fetchone()
+    if intent is None or record is None or record["obligation_id"] != obligation_id:
+        return False
+    if record["origin"] != "settlewell" or not record["airwallex_id"] or record["airwallex_id"] != intent["remote_id"]:
+        return False
+    return not (intent["request_id"] and record["request_id"] and intent["request_id"] != record["request_id"])
+
+
 def eligibility(conn, make_client, doc, obligation) -> str | None:
     """None when the stored proof may be shown now, else a short refusal reason. Never writes."""
-    if doc["transfer_record_id"] != obligation["live_transfer_id"]:
+    if doc["transfer_record_id"] != obligation["live_transfer_id"] and not _current_replacement(
+            conn, obligation["id"], doc["transfer_record_id"]):
         return "not_live_transfer"
     if obligation_pending(conn, obligation["id"]):
         return "webhook_pending"
@@ -122,8 +131,11 @@ def eligibility(conn, make_client, doc, obligation) -> str | None:
 
 
 def _blob_ok(conn, doc) -> bool:
-    blob = conn.execute("SELECT content, sha256 FROM proof_blob WHERE proof_document_id = ?",
-                        (doc["id"],)).fetchone()
+    try:
+        blob = conn.execute("SELECT content, sha256 FROM proof_blob WHERE proof_document_id = ?",
+                            (doc["id"],)).fetchone()
+    except sqlite3.OperationalError:
+        return False
     if blob is None:
         return False
     return (hashlib.sha256(blob["content"]).hexdigest() == blob["sha256"] == doc["sha256"]
@@ -166,7 +178,10 @@ def load_pdf(conn, make_client, incident_id: int, document_id: int) -> tuple[byt
                          (doc["transfer_record_id"],)).fetchone()
     if owner is None or owner["obligation_id"] != ob["id"]:
         raise LookupError("not_found", 404)
-    blob = conn.execute("SELECT * FROM proof_blob WHERE proof_document_id = ?", (doc["id"],)).fetchone()
+    try:
+        blob = conn.execute("SELECT * FROM proof_blob WHERE proof_document_id = ?", (doc["id"],)).fetchone()
+    except sqlite3.OperationalError:
+        blob = None
     if blob is None:
         raise LookupError("proof_unavailable", 404)
     if not _blob_ok(conn, doc) or blob["media_type"] != PDF_MEDIA_TYPE:

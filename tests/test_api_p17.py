@@ -111,7 +111,7 @@ def test_legacy_db_gets_only_the_additive_blob_table(tmp_path):
     _boot(path)
     after = _dump(path)
     assert {k: v for k, v in after.items() if k in before} == before
-    assert set(after) - set(before) == {"mock_remote", "proof_blob"}
+    assert set(after) - set(before) == {"mock_remote"}  # proof_blob is created by ledger.connect
 
 
 # ---- 2. proof PDF ----

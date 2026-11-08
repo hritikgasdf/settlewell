@@ -1,11 +1,11 @@
 # Plan status
 
-Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in review. Items 15–45 are not started.
+Build-plan checklist §5, one line each. Items 1–3 and 7–13 are done or merged. Item 6 is partial. Items 14–39 and 42 are in review, not merged. Item 40 is historical: it was done on an earlier tree and was not re-run for the current tree. Items 4, 5, 41, 43, 44 and 45 are not started.
 
-1. Claim Claude credits — done (Hritik). No PR.
+1. Claim Claude credits — done (operator). No PR.
 2. Private repo and .gitignore — done. Merged https://github.com/hritikgasdf/settlewell/pull/1
 3. Airwallex Docs MCP — done. https://github.com/hritikgasdf/settlewell/pull/1
-4. Block calendar through Sun 15 Nov — not started (Hritik's). No PR.
+4. Block calendar through Sun 15 Nov — not started (operator's). No PR.
 5. Gmail filter for sandbox mail — not started (optional). No PR.
 6. Local env — partial. `.env.example` landed in https://github.com/hritikgasdf/settlewell/pull/1. Python 3.12 + uv (`uv sync --frozen`, `uv run pytest`, `uv run ruff check`) is merged in https://github.com/hritikgasdf/settlewell/pull/2. Still open: loading `.env`, Node 20, and the LLM key.
 7. Sandbox smoke (login, then balances) — done. Login 201, balances 200. No PR.
@@ -33,17 +33,17 @@ Build-plan checklist §5, one line each. Items 8–13 are merged. Item 14 is in 
 29. Money ledger screen — in review. Result screen shows paid once and incident cost €13.47. https://github.com/hritikgasdf/settlewell/pull/24
 30. Visible outbox — in review. A reply waits until approved and is never sent. https://github.com/hritikgasdf/settlewell/pull/25
 31. Eval harness, first 15 incidents — in review. Fifteen cases report pass or fail with rule id and action. https://github.com/hritikgasdf/settlewell/pull/26
-32. Remaining 15 incidents — in review. All 30 cases pass, including a valid-JSON payment smuggle that escalates. https://github.com/hritikgasdf/settlewell/pull/27
+32. Remaining 15 incidents — in review. All 30 cases pass offline (MOCK), including a valid-JSON payment smuggle that escalates. https://github.com/hritikgasdf/settlewell/pull/27
 33. Property test — in review. Fixed examples keep one live payment, a second-person approval, and proof only on SENT or PAID. https://github.com/hritikgasdf/settlewell/pull/28
 34. Seed/reset script that leaves nothing at SENT — in review. Reset reseeds the hero and releases sandbox SENT transfers on the demo host only. https://github.com/hritikgasdf/settlewell/pull/29
 35. One-command local run of the app — in review. `uv run python -m settlewell` opens the mock console with no credentials. https://github.com/hritikgasdf/settlewell/pull/30
 36. Offline mock mode that replays the hero — in review. The hero runs offline, labelled MOCK, with a fidelity table. https://github.com/hritikgasdf/settlewell/pull/31
-37. README with setup, reference credit, baseline table, and honest limits — in review. Setup, the kit 3 credit line, the no-LLM baseline table, and the open limits. https://github.com/hritikgasdf/settlewell/pull/32
+37. README with setup, reference credit, baseline table, and honest limits — in review. Setup, the Airwallex documented-pattern credit line, the no-LLM baseline table, and the open limits. https://github.com/hritikgasdf/settlewell/pull/32
 38. Code readability pass — in review. Eval cases 24–29 report rule ids, and the README table matches. https://github.com/hritikgasdf/settlewell/pull/33
 39. Feature freeze — in review. No new actions, incidents, or console pages after this line. https://github.com/hritikgasdf/settlewell/pull/35
-40. Rehearse the hero twice on the sandbox — done. First pair https://github.com/hritikgasdf/settlewell/pull/36. Locked-quote pair https://github.com/hritikgasdf/settlewell/pull/37.
+40. Rehearse the hero twice on the sandbox — done on an earlier tree (historical, 2026-11-04). Not re-run for the current tree. First pair https://github.com/hritikgasdf/settlewell/pull/36. Locked-quote pair https://github.com/hritikgasdf/settlewell/pull/37.
 41. Rough-cut video and side clips — not started. No PR.
 42. Writeup outline and draft — in review. Outline and full draft in docs/writeup.md. https://github.com/hritikgasdf/settlewell/pull/38
 43. Final video and backup recording — not started. No PR.
-44. Writeup final and judge repo access — not started. No PR.
+44. Writeup final and reviewer repo access — not started. No PR.
 45. Dry-run the form and submit — not started. No PR.
