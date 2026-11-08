@@ -57,8 +57,21 @@ def test_get_is_read_only_and_shows_why(env):
     assert tuple(before) == tuple(after) and after["u"] == 0
     assert detail["banner"].startswith("MOCK") and detail["pinned_bank"]["account_last4"] == "4400"
     assert detail["proposals"][0]["can_approve"] is True
-    assert detail["proof"]["pdf_link"] is None
+    # The seeded demo DB now carries a matched claim and one stored MOCK/SYNTHETIC PDF on the live transfer.
+    assert detail["incident"]["evidence"]["claim_matched"] is True
+    assert detail["incident"]["claim"]["matched"] is True
+    link = "/api/incidents/1/proof/1/pdf"
+    assert detail["proof"]["pdf_link"] == link
+    doc = detail["proof"]["documents"][0]
+    assert doc["pdf_url"] == link and doc["refusal"] is None
+    assert doc["origin"] == "mock_synthetic" and "MOCK / SYNTHETIC" in doc["label"]
     assert client.get("/api/incidents").json()["incidents"][0]["pending_proposals"] == 1
+    # Fetching the linked PDF is a read: it returns the stored bytes and writes nothing.
+    pdf = client.get(link)
+    assert pdf.status_code == 200 and pdf.content[:5] == b"%PDF-"
+    assert pdf.headers["content-type"].startswith("application/pdf")
+    after_pdf = _rows(path, "SELECT (SELECT COUNT(*) FROM audit_event) a, (SELECT COUNT(*) FROM approval WHERE used_at IS NOT NULL) u")[0]
+    assert tuple(after_pdf) == tuple(before)
 
 
 def test_approve_goes_through_gate_and_cancels_durably(env, monkeypatch):

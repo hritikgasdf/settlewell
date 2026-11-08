@@ -21,6 +21,13 @@
 - `backend/airwallex/http.py` — HTTP types for the Airwallex adapter. No credentials are logged.
 - `backend/airwallex/types.py` — Typed Airwallex results. Money is Decimal so fees such as 13.47 stay exact.
 - `backend/api.py` — Local-demo FastAPI (MOCK only). Writes call execute(); loopback, Origin and CSRF guarded. Start: `uv run python -m backend.api`.
+- `backend/api_proof.py` — Gated MOCK/SYNTHETIC proof PDF for the demo API. Status-gated; never Airwallex proof.
+- `backend/incident_catalog.py` — The 30-incident plan catalog: expected actions and stage evidence.
+- `backend/incident_outreach.py` — Non-money `outreach` intents (reply/TRACE/escalate): bound approval, execute(), outbox only.
+- `backend/incident_remote.py` — Stateful mock remote for incident scenarios. No network.
+- `backend/incident_scenarios.py` — One real scenario per incident, run through execute.
+- `backend/incident_world.py` — Scenario world: ledger, remote, checks and helpers.
+- `backend/incidents.py` — Runner `python -m backend.incidents --all`: PASS only with real scenario evidence.
 - `backend/approvals.py` — Bound, single-use approvals. A changed detail voids the grant.
 - `backend/bank_change.py` — New supplier details become a new beneficiary only after validate and a call-back.
 - `backend/claims.py` — Strict claim parser. A model may only propose JSON. Code accepts it or escalates.

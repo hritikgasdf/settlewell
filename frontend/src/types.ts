@@ -156,6 +156,14 @@ export interface ProofDocument {
   status_at_issue: string;
   sha256: string;
   sent_at: string | null;
+  /** Same-origin relative URL, present only when the bytes exist and the document is eligible now. */
+  pdf_url: string | null;
+  /** Null when linkable; otherwise why the stored document is withheld right now. */
+  refusal: string | null;
+  /** "mock_synthetic" for seeded demo documents; null when no bytes are stored. */
+  origin: string | null;
+  /** Label to show beside the link, e.g. "MOCK / SYNTHETIC - not Airwallex proof". */
+  label: string | null;
 }
 
 export interface AuditRow {
@@ -172,7 +180,7 @@ export interface IncidentDetail {
     id: number;
     state: string;
     claim: Claim | null;
-    evidence: { claim_recorded: boolean };
+    evidence: { claim_recorded: boolean; claim_matched: boolean };
   };
   obligation: Obligation;
   supplier: Supplier;

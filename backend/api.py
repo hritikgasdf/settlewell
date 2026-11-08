@@ -20,9 +20,10 @@ from decimal import Decimal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend import api_proof
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import CancelResult, Transfer
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, binding_hash
@@ -34,6 +35,7 @@ from backend.execute import (
     intent_terms,
     open_intent,
 )
+from backend.fx_funding import FundingError
 from backend.ledger import (
     append_audit,
     connect,
@@ -41,6 +43,7 @@ from backend.ledger import (
     migrate,
     seed_hero,
 )
+from backend.replace_payment import ReplaceError
 from backend.stop_duplicate import StopDuplicateError
 
 BANNER = "MOCK / LOCAL DEMO - synthetic data, no live money"
@@ -150,6 +153,7 @@ def init_db(path: str) -> None:
     try:
         migrate(conn)
         conn.executescript(_MOCK_REMOTE)
+        conn.executescript(api_proof.PROOF_BLOB)  # additive; existing rows are untouched
         if conn.execute("SELECT COUNT(*) AS n FROM incident").fetchone()["n"] == 0:
             _seed_demo(conn)
     finally:
@@ -177,6 +181,8 @@ def _seed_demo(conn) -> None:
         reference=obligation["invoice_ref"],
     )
     conn.execute("UPDATE transfer_record SET details_hash = 'colleague-v1' WHERE id = ?", (dup,))
+    api_proof.seed_claim(conn, incident_id, int(obligation["supplier_id"]))
+    api_proof.seed_mock_proof(conn, obligation["live_transfer_id"], obligation["invoice_ref"], "SENT")
     for remote_id, status, ben in (
         (live["airwallex_id"], "SENT", "ben_lumen"),
         ("synthetic-dup-2291", CANCELLABLE, "ben_colleague"),
@@ -305,7 +311,8 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
         "mode": "MOCK" if mock_enabled() else "READ_ONLY",
         "banner": BANNER,
         "incident": {"id": inc["id"], "state": inc["state"], "claim": claim,
-                     "evidence": {"claim_recorded": claim is not None}},
+                     "evidence": {"claim_recorded": claim is not None,
+                                  "claim_matched": bool(claim and claim.get("matched") is True)}},
         "obligation": {k: ob[k] for k in (
             "id", "invoice_ref", "amount", "currency", "status", "live_transfer_id")},
         "supplier": {"id": sup["id"], "name": sup["name"], "contact": sup["contact"]},
@@ -482,11 +489,26 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         conn = db()
         try:
             detail = _incident_detail(conn, incident_id, OPERATOR)
+            if detail is not None:
+                detail["proof"] = api_proof.proof_view(conn, make_client, incident_id)
         finally:
             conn.close()
         if detail is None:
             raise ApiError(404, "not_found", "incident not found")
         return detail
+
+    @app.get("/api/incidents/{incident_id}/proof/{document_id}/pdf")
+    def proof_pdf(incident_id: int, document_id: int):
+        conn = db()
+        try:
+            data, headers = api_proof.load_pdf(conn, make_client, incident_id, document_id)
+        except LookupError as error:
+            code, status = error.args
+            raise ApiError(status, code.split(":")[0], f"proof refused: {code}",
+                           gate_code=code) from None
+        finally:
+            conn.close()
+        return Response(data, media_type=api_proof.PDF_MEDIA_TYPE, headers=headers)
 
     def _intent_in_incident(conn, incident_id: int, intent_id: int):
         row = conn.execute("SELECT * FROM execution_intent WHERE id = ?", (intent_id,)).fetchone()
@@ -515,7 +537,8 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
                          detail=f"intent={row['id']} by={OPERATOR}", created_at=stamp)
             conn.commit()
             result = execute(conn, client, row["id"], as_of=stamp)
-        except (ExecuteError, StopDuplicateError, AirwallexError) as error:
+        except (ExecuteError, StopDuplicateError, AirwallexError, ReplaceError,
+                FundingError) as error:
             code = getattr(error, "code", None) or "remote_error"
             closed = fail_closed(conn, row["id"], code=str(code), as_of=stamp)
             status, name = _STATUS.get(str(code), (409, "gate_refused"))

@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS outbox_message (
 );
 CREATE TABLE IF NOT EXISTS execution_intent (
     id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('replacement', 'fx_conversion', 'beneficiary', 'cancel')),
+    kind TEXT NOT NULL CHECK (kind IN ('replacement', 'fx_conversion', 'beneficiary', 'cancel', 'outreach')),
     incident_id INTEGER,
     obligation_id INTEGER,
     action TEXT NOT NULL,
@@ -247,6 +247,30 @@ def migrate(conn: sqlite3.Connection) -> None:
     if "request_id" not in snapshot_columns:
         conn.execute("ALTER TABLE balance_snapshot ADD COLUMN request_id TEXT")
     conn.commit()
+    _widen_intent_kind(conn)
+
+
+def _widen_intent_kind(conn: sqlite3.Connection) -> None:
+    """Rebuild an old execution_intent whose kind CHECK lacks 'outreach'. Rows and ids are kept.
+
+    No table references execution_intent and it has no index or trigger, so a copy-and-swap
+    is lossless. It runs in one transaction; any failure rolls back and leaves the old table.
+    """
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_intent'").fetchone()
+    if row is None or "'outreach'" in row["sql"]:
+        return
+    columns = ", ".join(r["name"] for r in conn.execute("PRAGMA table_info(execution_intent)"))
+    new_sql = SCHEMA.split("CREATE TABLE IF NOT EXISTS execution_intent", 1)[1].split(");", 1)[0]
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("CREATE TABLE execution_intent_new" + new_sql + ")")
+        conn.execute(f"INSERT INTO execution_intent_new ({columns}) SELECT {columns} FROM execution_intent")
+        conn.execute("DROP TABLE execution_intent")
+        conn.execute("ALTER TABLE execution_intent_new RENAME TO execution_intent")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def table_names(conn: sqlite3.Connection) -> set[str]:
