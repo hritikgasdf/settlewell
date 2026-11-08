@@ -863,26 +863,98 @@ def test_two_threads_execute_one_replacement(tmp_path):
     _obligation_id, incident_id = _ready(setup)
     ref = _grant(setup, incident_id)
     setup.close()
-    client = Pay()
-    barrier = threading.Barrier(2)
-    found: list[str] = []
+    from backend.airwallex.types import Transfer, TransferPage
 
-    def worker() -> None:
+    sent = threading.Event()
+    release = threading.Event()
+
+    class Gated(Pay):
+        def create_transfer(self, **kwargs):
+            transfer = super().create_transfer(**kwargs)
+            sent.set()  # accepted remotely, not yet recorded locally
+            assert release.wait(10)
+            return transfer
+
+        def list_transfers(self, **kwargs):
+            if not self.created or not release.is_set():
+                return TransferPage(items=(), page_after=None)  # not yet visible
+            made = self.created[0]
+            return TransferPage(
+                items=(
+                    Transfer(
+                        id="awx-new",
+                        status="SCHEDULED",
+                        request_id=made["request_id"],
+                        transfer_amount=made["transfer_amount"],
+                        transfer_currency=made["transfer_currency"],
+                        fee_amount=Decimal("13.47"),
+                        fee_currency="EUR",
+                        reference="INV-2291",
+                    ),
+                ),
+                page_after=None,
+            )
+
+    client = Gated()
+    outcome: dict = {}
+
+    def sender() -> None:
         local = connect(path)
         try:
-            barrier.wait()
-            found.append(execute(local, client, ref.id, as_of=SEEN).remote_id)
+            outcome["a"] = execute(local, client, ref.id, as_of=SEEN).remote_id
+        except Exception as error:  # noqa: BLE001 - re-asserted on the main thread
+            outcome["a_error"] = error
         finally:
             local.close()
 
-    threads = [threading.Thread(target=worker) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    thread = threading.Thread(target=sender)
+    thread.start()
+    contender = connect(path)
+    try:
+        assert sent.wait(10)
+        with pytest.raises(ReplaceError) as caught:
+            execute(contender, client, ref.id, as_of=SEEN)
+        assert caught.value.code == "in_flight"
+        assert len(client.created) == 1
+        release.set()
+        thread.join(10)
+        assert not thread.is_alive()
+        assert "a_error" not in outcome, outcome.get("a_error")
+        retried = execute(contender, client, ref.id, as_of=SEEN).remote_id
+    finally:
+        release.set()
+        contender.close()
 
-    assert found == ["awx-new", "awx-new"]
+    assert outcome["a"] == "awx-new"
+    assert retried == "awx-new"
     assert len(client.created) == 1
+    check = connect(path)
+    try:
+        request_id = client.created[0]["request_id"]
+        assert request_id
+        intent = check.execute(
+            "SELECT state, request_id, remote_id FROM execution_intent WHERE id = ?", (ref.id,)
+        ).fetchone()
+        assert (intent["state"], intent["request_id"], intent["remote_id"]) == (
+            "executed",
+            request_id,
+            "awx-new",
+        )
+        for table in ("transfer_record", "payout_funding"):
+            count = check.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE request_id = ?", (request_id,)
+            ).fetchone()[0]
+            assert count == 1, table
+        funding = check.execute(
+            "SELECT state, hold_state FROM payout_funding WHERE request_id = ?", (request_id,)
+        ).fetchone()
+        assert funding["state"] == "ACCEPTED"
+        used = check.execute(
+            "SELECT COUNT(*) FROM approval WHERE used_at IS NOT NULL"
+        ).fetchone()[0]
+        assert used == 1
+    finally:
+        check.close()
 
 
 def test_a_worker_that_read_the_intent_before_the_other_recorded_recovers_attempt_one(

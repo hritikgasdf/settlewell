@@ -69,22 +69,22 @@ Paraphrased from the plan's ordered checklist. Final statuses are PARTIAL or wor
 | 8 | Airwallex adapter (token, pinned version, throttle, typed results) | STATIC | `backend/airwallex/client.py` `AirwallexClient`; `types.py`; `test_airwallex_client.py`, `test_transport_timeout.py` | Live behaviour unverified |
 | 9 | Sandbox driver and contract | STATIC | `backend/sandbox.py` `SandboxDriver`; `scripts/sandbox_contract.py`; `test_sandbox_driver.py`, `test_reset.py` | Contract not run for this document |
 | 10 | Data model, ledger, seed | STATIC | `backend/ledger.py` `SCHEMA`; `scripts/seed_ledger.py`; `test_ledger.py` | Append-only is a convention, not enforced by the DB |
-| 11 | Poller, reversal join, account-wide index | PARTIAL | `backend/reconcile.py` `poll_incident`; `test_reconcile.py`, `test_reconcile_durable.py` | Index lacks supplier matching |
+| 11 | Poller, reversal join, account-wide index | PARTIAL | `backend/reconcile.py` `poll_incident`; `test_reconcile.py`, `test_reconcile_durable.py` | Account-wide look-alike scan is supplier/beneficiary-scoped (`paid_once.find_matches`); live read unverified |
 | 12 | Policy v1, failure-code table, rule ids | STATIC | `backend/policy.py` `decide`, `FAILURE_ROWS`; `test_policy.py` | Not every execution path calls it |
 | 13 | Claim parser (strict schema) and match | PARTIAL | `backend/claims.py` `parse_email`, `_match`; `test_claims*.py` | Live Claude path not run from this tree |
-| 14 | Account-wide paid-once scan | PARTIAL | `backend/paid_once.py` `scan_paid_once`; `test_paid_once.py` | Supplier and version matching and full pagination are gaps |
+| 14 | Account-wide paid-once scan | PARTIAL | `backend/paid_once.py` `scan_paid_once`; `test_paid_once.py` | `find_matches` reads every page (fails closed on a repeated or invalid page token; `test_the_scan_reads_past_250_transfers`) and `_classify` calls a transfer a duplicate only when its beneficiary is in the supplier's `bank_detail_version` rows and invoice, amount and currency match; anything else is AMBIGUOUS. One scenario test plus the pagination test; mock remote only |
 | 15 | WAIT, status-gated proof, ETA, trace draft, reply draft | PARTIAL | `backend/proof.py` `issue_proof`, `describe_eta`, `trace_draft`; `backend/api_proof.py`; `test_proof.py` | Demo PDF is synthetic. Serving checks status, settle window and hash (`api_proof.py`) |
-| 16 | Bound single-use approval | PARTIAL | `backend/approvals.py` `binding_hash`, `approve`; `backend/execute.py`; `test_approvals.py` | Current code binds FX (`fx_quote.py`) and payout (`funding.py`, binding check) paths. Not every path re-traced this pass |
+| 16 | Bound single-use approval | PARTIAL | `backend/approvals.py` `binding_hash`, `approve`; `backend/execute.py`; `test_approvals.py` | Current code binds FX (`fx_quote.py`) and payout (`funding.py`, binding check) paths. Binding checks seen at `fx_quote.py:197` and `funding.py:434`; not exhaustively traced |
 | 17 | Approver ≠ proposer, two identities | STATIC | `approvals.py` `AP_CLERK`, `FINANCE_APPROVER`; `test_approvals.py` | Identities are demo labels; no login |
 | 18 | STOP_DUPLICATE (cancel, €0) | PARTIAL | `backend/stop_duplicate.py`; scenario 3 | Mock cost 0. Live cancel only in the historical run |
 | 19 | REPLACE, lock, `stl-` request id | PARTIAL | `backend/replace_payment.py` `replace_payment`; `test_replace_payment.py` | Two-thread test exists; mock remote only |
 | 20 | One replacement per failure; unknown stays IN_FLIGHT; six-day rule | PARTIAL | `replace_payment.py` (`_DEDUPE_MARGIN` = 6 days, check at line ~438); scenario 14 | The audit's "off by default" claim is not supported by the current code. The enforcement path was not fully traced |
 | 21 | Replacement input = obligation + incident only | STATIC | `backend/replacement_tool.py` `propose_replacement`; `test_replacement_tool.py` | |
-| 22 | Refund-confirmed replacement (N1) | PARTIAL | `replacement_tool.refund_card`; `test_refund_card.py`, `test_funding_refunds.py` | No full-principal equality check |
+| 22 | Refund-confirmed replacement (N1) | PARTIAL | `replacement_tool.refund_card`; `test_refund_card.py`, `test_funding_refunds.py` | Cash-refund principal/source/currency checks are exercised in mock funding tests; provider evidence is not live-verified |
 | 23 | Bank-change gate: validate, call-back, new beneficiary, diff | PARTIAL | `backend/bank_change.py` `verify_bank_change`, `propose`, `binding_hash`; `test_bank_change.py`; scenarios 7, 9, 26 | Call-back is scripted by the approver, not a human call. Mock remote only |
 | 24 | FX reserve floor and limit | PARTIAL | `backend/fx_funding.py` `fund_replacement`; `test_fx_funding.py`; scenario 24 | The audit's pre-approval conversion claim was not re-traced end to end |
 | 25 | FxQuote single-use and expiry | PARTIAL | `backend/fx_quote.py` `approve_fx_quote`, `execute_fx_quote`; `test_fx_quote.py`; scenario 29 | Current code checks the binding hash before approve and execute |
-| 26 | Colleague already re-paid (N2) | PARTIAL | `backend/repaid.py` `colleague_repaid`; `test_repaid.py`; scenario 6 | Supplier and post-return matching are gaps |
+| 26 | Colleague already re-paid (N2) | PARTIAL | `backend/repaid.py` `colleague_repaid`; `test_repaid.py`; scenario 6 | Supplier-aware scan and complete-outcome reconciliation are implemented; live behavior unverified |
 | 27 | Webhook receiver | PARTIAL | `backend/webhooks.py` `receive_webhook`, `_verify`, `_apply`; `api.py` POST route; `worker.py`; `test_webhooks.py`, `test_webhook_settle.py` | Apply runs in the request. Retry behaviour untested. No hosted registration |
 | 28 | Console skeleton | PARTIAL | `backend/console.py`; `frontend/` React console; `test_console.py`, `test_api.py`, `test_api_p17.py` | MOCK. SANDBOX write guard implemented and targeted MOCK-transport tested; live sandbox/browser action NOT RUN |
 | 29 | Money ledger, results, FX beat | PARTIAL | `console.py` `_ledger`; `frontend/` | Some result data is seeded |
@@ -110,8 +110,8 @@ Paraphrased from the plan's ordered checklist. Final statuses are PARTIAL or wor
 | # | Must-have (paraphrase) | Status | Symbols / tests | Gap |
 |---|---|---|---|---|
 | 1 | Supplier email → schema-validated claim | PARTIAL | `claims.parse_email`; `test_claims*.py` | No email intake; live call not run |
-| 2 | Match claim → obligation → transfer | PARTIAL | `claims._match`; `replacement_tool.py` | No multi-transfer match |
-| 3 | Account-wide paid-once guard | PARTIAL | `paid_once.scan_paid_once`; `test_paid_once.py` | Supplier and version matching |
+| 2 | Match claim → obligation → transfer | PARTIAL | `claims._match`; `replacement_tool.py` | `_match` is supplier-scoped and anchors on the obligation's `live_transfer_id`; more than one row is R-AMBIGUOUS, a foreign-supplier invoice is R-IDENTITY-MISMATCH. Downstream transfers are loaded by the reconciler, not the claim match |
+| 3 | Account-wide paid-once guard | PARTIAL | `paid_once.scan_paid_once`; `test_paid_once.py` | Supplier/beneficiary-scoped and paginated (`paid_once.py`); mock remote only |
 | 4 | Live investigation | PARTIAL | `reconcile.poll_incident`; `backend/airwallex/client.py` | Live read unverified |
 | 5 | Deterministic policy engine | PARTIAL | `policy.decide`; `test_policy.py` | Not consulted by every path |
 | 6 | Status-gated proof | PARTIAL | `proof.issue_proof`; `api_proof.py`; scenario 22 | Gate on GET; synthetic PDF |
@@ -119,13 +119,13 @@ Paraphrased from the plan's ordered checklist. Final statuses are PARTIAL or wor
 | 8 | Bank-change gate | PARTIAL | `bank_change.py`; scenarios 7, 9 | Call-back scripted |
 | 9 | Bound single-use approvals | PARTIAL | `approvals.binding_hash`, `approve`; `execute.execute`; `fx_quote.py`; `funding.py` | Not every path re-traced |
 | 10 | No double pay on our side | PARTIAL | `replace_payment.py`; scenarios 13, 14 | External race not tested live |
-| 11 | Reconciler (poll + webhook, closure rule) | PARTIAL | `reconcile.py`; `webhooks.py`; `worker.py`; `outcomes.decide_set` | Not every path enforces the closure rule |
+| 11 | Reconciler (poll + webhook, closure rule) | PARTIAL | `reconcile.py`; `webhooks.py`; `worker.py`; `outcomes.decide_set` | Poll, `webhooks.settle` and `worker` all decide through `reconcile.poll_incident` → `_decide` → `decide_set` (reconcile.py:458); `repaid.py` uses `reduce_outcome`. Mock only |
 | 12 | Console | PARTIAL | `console.py`; `frontend/` | MOCK, local, no login |
 | 13 | Balance and FX funding check | PARTIAL | `fx_funding.py`; `fx_quote.py`; scenarios 24, 29 | MOCK |
 | 14 | 30-incident harness + property test | PARTIAL | `incidents.py`; `incident_scenarios.py`; `tests/test_properties.py` | MOCK-only |
 | 15 | Runnable demo, video, README | PARTIAL | `README.md`; `scripts/run_console.sh`; `backend.api` | Video NOT VERIFIED; live flow not run |
-| 16 | Money back before money out (N1) | PARTIAL | `replacement_tool.refund_card` | Principal equality not checked |
-| 17 | Colleague already re-paid (N2) | PARTIAL | `repaid.colleague_repaid`; scenario 6 | Supplier and date validation gap |
+| 16 | Money back before money out (N1) | PARTIAL | `replacement_tool.refund_card` | Full cash-refund terms covered by mock tests; live provider reversal unverified |
+| 17 | Colleague already re-paid (N2) | PARTIAL | `repaid.colleague_repaid`; scenario 6 | Supplier-aware payout-boundary scan; live external-payment behavior unverified |
 
 Should-haves §2.2 (2 items): visible outbox (PARTIAL, `outbox.py`); no-LLM baseline (STATIC, the `README.md` table is a static expectation, not a measured comparison).
 
@@ -173,12 +173,12 @@ Beat names follow the plan's time table. Every beat is MOCK-ONLY, LIVE-HIST, or 
 | # | Beat (plan time) | Code and tests | Status | Gap |
 |---|---|---|---|---|
 | 1 | Cold open, supplier email (0:00) | `claims.parse_email` (offline completer); `mock_replay.py` | MOCK-ONLY | Email text is a constant; live Claude not run |
-| 2 | Investigate, colleague's scheduled duplicate (0:12) | `paid_once.scan_paid_once`; `sc_3` | MOCK-ONLY | Index lacks supplier matching |
+| 2 | Investigate, colleague's scheduled duplicate (0:12) | `paid_once.scan_paid_once`; `sc_3` | MOCK-ONLY | Scan is supplier/beneficiary-scoped; mock remote only |
 | 3 | Stop the duplicate, approver ≠ proposer (0:45) | `stop_duplicate.py`; `approvals.py`; `execute.py`; `sc_3`, `sc_11` | MOCK-ONLY; LIVE-HIST for the cancel | Cost 0 proven only in the historical run |
 | 4 | WAIT and proof while SENT, trace draft, outbox (1:08) | `proof.py`; `api_proof.py`; `outbox.py`; `sc_1`, `sc_20` | MOCK-ONLY | PDF synthetic; outbox does not send |
 | 5 | New information: `failed` 90701, resend refused (1:35) | `webhooks._apply`; `proof.py`; `sc_22` | MOCK-ONLY | Replay uses a poll; hosted webhook not verified |
 | 6 | Resolve: validate, call-back, new beneficiary (1:57) | `bank_change.verify_bank_change`; `sc_9` | MOCK-ONLY | Call-back scripted by approver |
-| 7 | Money back first, PAYOUT_REVERSAL (2:20) | `replacement_tool.refund_card`; `sc_5` | MOCK-ONLY | Not full-principal equality |
+| 7 | Money back first, PAYOUT_REVERSAL (2:20) | `replacement_tool.refund_card`; `sc_5` | MOCK-ONLY | Full-refund mock coverage; no fresh live reversal proof |
 | 8 | Funding and FX on a locked quote; reuse rejected (2:30) | `fx_funding.py`; `fx_quote.py`; `sc_24`, `sc_29` | MOCK-ONLY; LIVE-HIST for one conversion | Mock hero does not run the FX beat |
 | 9 | One bound approval, one replacement, one per failure (2:48) | `approvals.py`; `replace_payment.py`; `sc_13`, `sc_14` | MOCK-ONLY | Mock hero `approved_replacement` PASS is canned replay only |
 | 10 | Result: balances, paid once, incident cost (3:08) | `outcomes.decide_set`; `console.py`; `incidents.py` | MOCK-ONLY | Mock hero `reconcile_both` PASS is canned replay only |
@@ -193,8 +193,8 @@ Beat names follow the plan's time table. Every beat is MOCK-ONLY, LIVE-HIST, or 
 | 3.4-3 `paid` provisional; settle window; later `failed` wins | `webhook_state`; `worker.py` settles windows; `reconcile.py` read | PARTIAL | Window is durable. Worker runs in the local process only |
 | 3.4-4 Store failure reason on receipt | `webhooks._apply` calls `remember_failure_reason` | STATIC | |
 | 3.4-5 Fast 2xx, async processing; polling as backstop | `api.py` POST route; `worker.py` polls every 5 s | PARTIAL | Apply is synchronous in the request. Retry behaviour untested |
-| §2.1 #11 Close only when original and replacement are both accounted for | `outcomes.decide_set`, `reduce_outcome` | PARTIAL | Not every path calls the reducer |
-| §2.1 #17 Colleague re-paid closes against the external transfer | `repaid.colleague_repaid` | PARTIAL | Matching gaps (see §2 #17) |
+| §2.1 #11 Close only when original and replacement are both accounted for | `outcomes.decide_set`, `reduce_outcome` | PARTIAL | Reconciler paths (poll, webhook settle, worker) call `decide_set`; `repaid.py` calls `reduce_outcome`. Mock only |
+| §2.1 #17 Colleague re-paid closes against the external transfer | `repaid.colleague_repaid` | PARTIAL | Supplier-aware scan and outcome reduction; live external-payment behavior unverified |
 
 ## 6. Non-code items (not verified, nothing performed)
 
