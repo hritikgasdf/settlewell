@@ -172,6 +172,11 @@ def execute(conn, client, intent_id: int, *, as_of: str) -> ExecuteResult:
     if intent["state"] == "executed":
         return _resume(conn, client, intent, as_of)
     _ready(conn, intent, as_of)
+    if intent["kind"] in ("replacement", "fx_conversion"):
+        from backend.webhooks import obligation_pending
+
+        if obligation_pending(conn, intent["obligation_id"]):
+            raise ExecuteError("pending_webhook")
     if intent["kind"] == "replacement":
         _replacement_policy(conn, client, intent)
         from backend.replacement_tool import propose_replacement

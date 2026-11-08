@@ -229,21 +229,105 @@ def test_worker_holds_when_resume_is_refused():
     assert "worker_resume_held" in _kinds(conn, incident_id)
 
 
-def test_worker_binds_a_conversion_by_stored_request_id_only():
+class _NoPost(Remote):
+    """Remote that records any write attempt instead of performing one."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.posts = []
+
+    def create_conversion(self, **kwargs):
+        self.posts.append(kwargs)
+        raise AssertionError("unexpected conversion POST")
+
+
+def test_worker_refuses_to_bind_a_conversion_without_an_owning_approved_intent():
     conn = connect()
     _hero(conn)
     conn.execute("INSERT INTO fx_quote (quote_id, pair, rate, amount, valid_to, state, consumed_by) "
                  "VALUES ('q-1', 'USDEUR', '0.9', '100', '2099-01-01T00:00:00+00:00', 'CONSUMED', '')")
     conn.commit()
-    remote = Remote("SENT")
-    tick(conn, remote, NOW)  # nothing found: stays held, never released
-    assert conn.execute("SELECT state, consumed_by FROM fx_quote").fetchone()[:] == ("CONSUMED", "")
-    remote.conversion = Conversion(conversion_id="conv-1", status="SETTLED", quote_id="other")
-    tick(conn, remote, NOW)  # mismatched quote: still held
-    assert conn.execute("SELECT consumed_by FROM fx_quote").fetchone()[0] == ""
+    remote = _NoPost("SENT")
     remote.conversion = Conversion(conversion_id="conv-1", status="SETTLED", quote_id="q-1")
-    assert tick(conn, remote, NOW)["conversions"] == ["q-1"]
-    assert conn.execute("SELECT consumed_by FROM fx_quote").fetchone()[0] == "conv-1"
+    report = tick(conn, remote, NOW)  # a perfectly matching remote conversion, but nobody owns it
+    assert report["conversions"] == [] and report["resumed"] == []
+    assert conn.execute("SELECT state, consumed_by FROM fx_quote").fetchone()[:] == ("CONSUMED", "")
+    assert conn.execute("SELECT COUNT(*) FROM execution_intent").fetchone()[0] == 0
+    assert remote.posts == []
+
+
+def _fx_recovery_setup(path=None):
+    from test_fx_quote import EARLY, _proposed
+
+    from backend.execute import execute
+
+    conn = connect(path) if path else connect()
+    _proposed(conn)
+    intent = conn.execute("SELECT id FROM execution_intent WHERE quote_id = 'quo_1'").fetchone()["id"]
+    desk = Remote("SENT")  # real read fakes; its conversion POST crashes after the remote accepted it
+    desk.converted = []
+    found = {}
+
+    def create_conversion(**kwargs):
+        desk.converted.append(kwargs)
+        found[kwargs["request_id"]] = Conversion(conversion_id="con_crash", status="SETTLED",
+                                                 quote_id=kwargs["quote_id"])
+        raise RuntimeError("crash")
+
+    desk.create_conversion = create_conversion
+    desk.find_conversion = found.get
+    with pytest.raises(RuntimeError, match="crash"):
+        execute(conn, desk, intent, as_of=EARLY)
+    return conn, desk, intent
+
+
+def test_worker_recovers_a_conversion_through_its_owning_intent_with_zero_posts(tmp_path):
+    path = str(tmp_path / "fx.db")
+    conn, desk, intent = _fx_recovery_setup(path)
+    request_id = conn.execute("SELECT request_id FROM execution_intent WHERE id = ?", (intent,)).fetchone()[0]
+    assert request_id and desk.converted[0]["request_id"] == request_id
+    conn.close()
+    conn = connect(path)  # restart: only durable state survives
+    report = tick(conn, desk, NOW)
+    assert intent in report["conversions"]
+    assert len(desk.converted) == 1  # recovery by request id, never a second POST
+    row = conn.execute("SELECT remote_id, request_id FROM execution_intent WHERE id = ?", (intent,)).fetchone()
+    assert (row["remote_id"], row["request_id"]) == ("con_crash", request_id)
+    assert conn.execute("SELECT state, consumed_by FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()[:] == (
+        "CONSUMED", "con_crash")
+
+
+@pytest.mark.parametrize("found_quote", ["other", None])
+def test_worker_does_not_bind_a_foreign_or_unbound_conversion(found_quote):
+    conn, desk, intent = _fx_recovery_setup()
+    desk.find_conversion = lambda _rid: Conversion(conversion_id="con_x", status="SETTLED", quote_id=found_quote)
+    report = tick(conn, desk, NOW)
+    assert report["conversions"] == [] and intent in report["held"]
+    assert conn.execute("SELECT remote_id FROM execution_intent WHERE id = ?", (intent,)).fetchone()[0] is None
+    assert conn.execute("SELECT consumed_by FROM fx_quote WHERE quote_id = 'quo_1'").fetchone()[0] == ""
+    assert len(desk.converted) == 1
+
+
+def test_fx_execute_rejects_missing_quote_wrong_owner_and_unapproved():
+    from test_fx_quote import EARLY, _proposed
+
+    from backend.approvals import ApprovalTerms
+    from backend.fx_quote import FxQuoteError, execute_fx_quote
+
+    conn = connect()
+    terms, _ = _proposed(conn)
+    row = conn.execute("SELECT id, approval_id FROM execution_intent WHERE quote_id = 'quo_1'").fetchone()
+    desk = _NoPost("SENT")
+
+    def attempt(approval_id, t, **kw):
+        with pytest.raises(FxQuoteError):
+            execute_fx_quote(conn, desk, approval_id, t, as_of=EARLY, **kw)
+
+    attempt(row["approval_id"], ApprovalTerms(**{**terms.__dict__, "quote_id": None}), intent_id=row["id"])
+    attempt(row["approval_id"], ApprovalTerms(**{**terms.__dict__, "quote_id": "nope"}), intent_id=row["id"])
+    attempt(row["approval_id"] + 99, terms, intent_id=row["id"])  # wrong approval
+    assert desk.posts == [] and conn.execute("SELECT state FROM fx_quote").fetchone()[0] == "LOCKED"
+    assert conn.execute("SELECT state, remote_id FROM execution_intent").fetchone()[:] == ("proposed", None)
 
 
 def test_worker_thread_starts_and_stops_cleanly(tmp_path):
@@ -355,3 +439,136 @@ def test_worker_finalizes_a_claimed_cancel_that_landed_without_resending():
     intent = conn.execute("SELECT remote_id, remote_status FROM execution_intent").fetchone()
     assert (intent["remote_id"], intent["remote_status"]) == ("awx-dup", "CANCELLED")
     assert conn.execute("SELECT status FROM transfer_record WHERE airwallex_id = 'awx-dup'").fetchone()[0] == "CANCELLED"
+
+
+def _sibling(conn, transfer_id="awx-sib"):
+    conn.execute(
+        "INSERT INTO transfer_record (airwallex_id, obligation_id, origin, amount, currency, status, reference) "
+        "SELECT ?, obligation_id, 'external', amount, currency, 'SENT', reference FROM transfer_record "
+        "WHERE airwallex_id = 'awx-hero'", (transfer_id,))
+    conn.commit()
+
+
+def _windows_left(conn):
+    return sorted(r[0] for r in conn.execute("SELECT transfer_airwallex_id FROM webhook_state"))
+
+
+def test_staggered_windows_on_one_obligation_hold_everything_until_all_mature(tmp_path):
+    path = str(tmp_path / "s.db")
+    conn = connect(path)
+    incident_id = _hero(conn, status="SENT")
+    _sibling(conn)
+    _paid(conn)  # hero window ends NOW + 10_000
+    _deliver(conn, _event("evt-sib", "payout.transfer.paid", NOW + 5_000, "PAID", id="awx-sib"), NOW + 5_000,
+             now=NOW + 5_000)  # sibling window ends NOW + 15_000
+    conn.close()
+    conn = connect(path)  # reopen: windows are durable
+    remote = Remote("PAID")
+    assert settle(conn, remote, NOW + 10_000) == []  # hero matured, sibling has not
+    assert remote.reads == 0 and _windows_left(conn) == ["awx-hero", "awx-sib"]
+    assert _obligation(conn) == "OPEN" and incident_pending(conn, incident_id)
+    report = tick(conn, remote, NOW + 12_000)
+    assert report["settled"] == [] and incident_id not in report["polled"] and remote.reads == 0
+    assert _windows_left(conn) == ["awx-hero", "awx-sib"] and _obligation(conn) == "OPEN"
+    assert sorted(settle(conn, remote, NOW + 15_000)) == ["awx-hero", "awx-sib"]
+    assert remote.reads > 0 and _windows_left(conn) == []
+
+
+def test_a_window_on_a_sibling_transfer_blocks_the_obligation_poll_and_hold():
+    conn = connect()
+    incident_id = _hero(conn, status="SENT")
+    _sibling(conn)
+    _deliver(conn, _event("evt-sib", "payout.transfer.paid", NOW, "PAID", id="awx-sib"), NOW)
+    assert incident_pending(conn, incident_id)  # the hero itself has no window
+    remote = Remote("PAID")
+    assert incident_id not in tick(conn, remote, NOW + 1_000)["polled"] and remote.reads == 0
+
+
+def test_an_event_landing_during_the_authoritative_poll_is_not_overwritten(tmp_path):
+    path = str(tmp_path / "race.db")
+    conn = connect(path)
+    incident_id = _hero(conn, status="SENT")
+    _paid(conn)
+    other = connect(path)  # a second connection: the receiver racing the worker
+
+    class Racing(Remote):
+        fired = False
+
+        def get_transfer(self, transfer_id):
+            if not self.fired:
+                self.fired = True  # deterministic barrier: lands mid-read, before the decision
+                _deliver(other, _event("evt-ret", "payout.transfer.failed", NOW + 9_000, "FAILED"),
+                         NOW + 9_000, now=NOW + 10_000)
+            return super().get_transfer(transfer_id)
+
+    remote = Racing("PAID")
+    assert settle(conn, remote, NOW + 10_000) == []  # stale PAID read must not authorise anything
+    assert remote.fired
+    row = conn.execute("SELECT event_id, latest_status, settle_until_ms FROM webhook_state").fetchone()
+    assert tuple(row) == ("evt-ret", "FAILED", NOW + 20_000)  # newer generation kept, window not cleared
+    assert _obligation(conn) != "PAID_ONCE" and _status(conn) != "PAID"
+    assert incident_pending(conn, incident_id)
+    assert settle(conn, Remote("FAILED", reason="90802: returned"), NOW + 19_999) == []
+    assert settle(conn, Remote("FAILED", reason="90802: returned"), NOW + 20_000) == ["awx-hero"]
+    assert _windows_left(conn) == [] and _obligation(conn) != "PAID_ONCE"
+
+
+def _funded_setup():
+    from test_funding_execute import NEED, _setup, rows
+
+    return _setup(balances=[rows(str(NEED)), rows("777.77")])
+
+
+def _open_window(conn, transfer_id):
+    conn.execute(
+        "INSERT INTO webhook_state (transfer_airwallex_id, latest_event_ts_ms, latest_status, settle_until_ms, "
+        "event_id) VALUES (?, ?, 'PAID', ?, 'evt-w')", (transfer_id, NOW, NOW + 10_000))
+    conn.commit()
+
+
+def _durable(conn):
+    return {
+        "approval": [tuple(r) for r in conn.execute("SELECT id, used_at, binding_hash FROM approval ORDER BY id")],
+        "intent": [tuple(r) for r in conn.execute("SELECT id, state, request_id, remote_id FROM execution_intent")],
+        "funding": conn.execute("SELECT COUNT(*) FROM payout_funding").fetchone()[0],
+        "snapshots": conn.execute("SELECT COUNT(*) FROM balance_snapshot").fetchone()[0],
+        "transfers": conn.execute("SELECT COUNT(*) FROM transfer_record").fetchone()[0],
+    }
+
+
+@pytest.mark.parametrize("window_on", ["original", "sibling"])
+def test_a_valid_funded_payout_refuses_during_a_settle_window_then_sends_exactly_once(window_on):
+    from backend.execute import ExecuteError, execute
+
+    conn, client, ref = _funded_setup()
+    if window_on == "sibling":
+        _sibling(conn)
+    _open_window(conn, "awx-hero" if window_on == "original" else "awx-sib")
+    before = _durable(conn)
+    assert before["approval"][0][1] and before["intent"][0][1:] == ("proposed", None, None)  # genuinely approved
+
+    with pytest.raises(ExecuteError) as caught:  # standalone
+        execute(conn, client, ref.id, as_of="2026-11-03T12:00:00+00:00")
+    assert caught.value.code == "pending_webhook"
+    report = tick(conn, client, NOW + 1_000)  # worker resume of the same consumed-approval intent
+    assert ref.id in report["held"] and not report["resumed"]
+    assert client.created == [] and client.conversions == []  # zero POST, no funding conversion
+    assert _durable(conn) == before  # claim, grant, funding: nothing written, no regrant
+
+    conn.execute("DELETE FROM webhook_state")  # window gone: the very same grant now pays exactly once
+    conn.execute("DELETE FROM transfer_record WHERE airwallex_id = 'awx-sib'")  # sibling was only a window carrier
+    conn.commit()
+    result = execute(conn, client, ref.id, as_of="2026-11-03T12:00:00+00:00")
+    assert result.remote_id == "awx-new" and len(client.created) == 1 and client.conversions == []
+    after = _durable(conn)
+    assert after["approval"] == before["approval"] and after["funding"] == 1
+
+
+def test_positive_control_the_same_funded_payout_without_a_window_sends_once():
+    from backend.execute import execute
+
+    conn, client, ref = _funded_setup()
+    result = execute(conn, client, ref.id, as_of="2026-11-03T12:00:00+00:00")
+    assert result.remote_id == "awx-new" and len(client.created) == 1 and client.conversions == []
+    assert execute(conn, client, ref.id, as_of="2026-11-03T12:00:00+00:00").remote_id == "awx-new"
+    assert len(client.created) == 1

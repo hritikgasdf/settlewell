@@ -11,8 +11,7 @@ from datetime import UTC, datetime
 
 from backend.airwallex.client import AirwallexError
 from backend.execute import ExecuteError, execute
-from backend.fx_funding import conversion_request_id
-from backend.ledger import append_audit, record_fx_conversion
+from backend.ledger import append_audit
 from backend.reconcile import _LOOKUP_ERRORS, poll_incident
 from backend.webhooks import incident_pending, settle
 
@@ -25,13 +24,15 @@ def tick(conn, client, now_ms: int) -> dict:
     report = {"settled": [], "resumed": [], "polled": [], "held": [], "conversions": []}
     report["settled"] = settle(conn, client, now_ms)
     for row in conn.execute(
-        """SELECT e.id, e.incident_id FROM execution_intent e JOIN approval a ON a.id = e.approval_id
+        """SELECT e.id, e.incident_id, e.kind FROM execution_intent e JOIN approval a ON a.id = e.approval_id
            WHERE (e.state = 'proposed' OR (e.state = 'executed' AND e.remote_id IS NULL))
              AND a.used_at IS NOT NULL ORDER BY e.id"""
     ).fetchall():
         try:  # same intent, same approval; execute re-checks terms, expiry and ownership
             execute(conn, client, row["id"], as_of=seen)
             report["resumed"].append(row["id"])
+            if row["kind"] == "fx_conversion":  # recovered only through its owning, approved intent
+                report["conversions"].append(row["id"])
         except _ERRORS as error:
             conn.rollback()
             append_audit(conn, incident_id=row["incident_id"], kind="worker_resume_held",
@@ -47,17 +48,6 @@ def tick(conn, client, now_ms: int) -> dict:
         except _ERRORS:
             conn.rollback()
             report["held"].append(row["id"])
-    for quote in conn.execute(
-        "SELECT quote_id FROM fx_quote WHERE state = 'CONSUMED' AND consumed_by = ''"
-    ).fetchall():
-        try:  # look up by stored request id; never create or release on an unknown answer
-            found = client.find_conversion(conversion_request_id(quote["quote_id"]))
-        except _ERRORS:
-            conn.rollback()
-            continue
-        if found is not None and found.quote_id in (None, quote["quote_id"]):
-            record_fx_conversion(conn, quote["quote_id"], found.conversion_id)
-            report["conversions"].append(quote["quote_id"])
     conn.commit()
     return report
 

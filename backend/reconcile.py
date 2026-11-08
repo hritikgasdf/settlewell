@@ -33,7 +33,7 @@ _LOOKUP_ERRORS = (HistoryError, AirwallexError, TimeoutError, OSError, ReplaceEr
 
 
 def poll_incident(conn, client, incident_id: int, *, seen_at: str, settled: bool = False,
-                  report: dict | None = None) -> list[dict]:
+                  report: dict | None = None, guard=None) -> list[dict]:
     """Recover our own attempts by stored request id, read every payment, then decide once.
 
     Reads only: nothing here creates, retries or posts a payment. While a webhook settle
@@ -83,6 +83,11 @@ def poll_incident(conn, client, incident_id: int, *, seen_at: str, settled: bool
         _set_status(conn, obligation["id"], "IN_FLIGHT")
     if report is not None:
         report["incomplete"] = incomplete or original_id is None
+    if guard is not None and not guard():  # a newer event arrived while we read: decide nothing
+        conn.rollback()
+        if report is not None:
+            report["superseded"] = True
+        return timeline(conn, incident_id)
     _decide(conn, incident_id, obligation, original_id, outcomes, incomplete, bool(unresolved), seen_at)
     conn.commit()
     return timeline(conn, incident_id)

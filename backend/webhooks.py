@@ -130,13 +130,33 @@ def receive_webhook(
 
 def incident_pending(conn, incident_id: int) -> bool:
     """True while a transfer of this incident's obligation has a webhook that is not yet settled."""
+    row = conn.execute("SELECT obligation_id FROM incident WHERE id = ?", (incident_id,)).fetchone()
+    return row is not None and obligation_pending(conn, row["obligation_id"])
+
+
+def obligation_pending(conn, obligation_id: int | None) -> bool:
+    """True while any transfer of this obligation has a webhook that is not yet settled.
+
+    This is the one guard the payout boundary (execute, replace_payment) and the worker share."""
+    if obligation_id is None:
+        return False
     row = conn.execute(
         """SELECT 1 FROM webhook_state s
            JOIN transfer_record t ON t.airwallex_id = s.transfer_airwallex_id
-           JOIN incident i ON i.obligation_id = t.obligation_id WHERE i.id = ? LIMIT 1""",
-        (incident_id,),
+           WHERE t.obligation_id = ? LIMIT 1""",
+        (obligation_id,),
     ).fetchone()
     return row is not None
+
+
+def _windows(conn, obligation_id: int) -> tuple:
+    rows = conn.execute(
+        """SELECT s.transfer_airwallex_id, s.event_id, s.latest_event_ts_ms, s.settle_until_ms
+           FROM webhook_state s JOIN transfer_record t ON t.airwallex_id = s.transfer_airwallex_id
+           WHERE t.obligation_id = ? ORDER BY s.transfer_airwallex_id""",
+        (obligation_id,),
+    ).fetchall()
+    return tuple(tuple(row) for row in rows)
 
 
 def settle(conn, client, now_ms: int) -> list[str]:
@@ -145,34 +165,48 @@ def settle(conn, client, now_ms: int) -> list[str]:
     from backend.reconcile import _LOOKUP_ERRORS, poll_incident
 
     done: list[str] = []
-    due = conn.execute(
-        "SELECT transfer_airwallex_id, event_id FROM webhook_state WHERE settle_until_ms <= ?", (now_ms,)
-    ).fetchall()
-    for state in due:
-        transfer_id = state["transfer_airwallex_id"]
-        row = conn.execute(
-            """SELECT i.id AS incident_id FROM transfer_record t JOIN incident i ON i.obligation_id = t.obligation_id
-               WHERE t.airwallex_id = ? ORDER BY i.id LIMIT 1""",
-            (transfer_id,),
-        ).fetchone()
-        if row is not None:
-            seen = _iso(now_ms)
+    obligations = [
+        row[0]
+        for row in conn.execute(
+            """SELECT DISTINCT t.obligation_id FROM webhook_state s
+               JOIN transfer_record t ON t.airwallex_id = s.transfer_airwallex_id
+               WHERE t.obligation_id IS NOT NULL AND s.settle_until_ms <= ?""",
+            (now_ms,),
+        )
+    ]
+    for obligation_id in obligations:
+        snapshot = _windows(conn, obligation_id)
+        if not snapshot or any(window[3] > now_ms for window in snapshot):
+            continue  # one live window holds the whole obligation
+        incidents = [r["id"] for r in conn.execute("SELECT id FROM incident WHERE obligation_id = ?", (obligation_id,))]
+        seen = _iso(now_ms)
+        held = False
+        for incident_id in incidents:
             report: dict = {}
             try:
-                poll_incident(conn, client, row["incident_id"], seen_at=seen, settled=True, report=report)
-                if report.get("incomplete", True):
-                    raise HistoryError("incomplete remote evidence")
+                poll_incident(
+                    conn, client, incident_id, seen_at=seen, settled=True, report=report,
+                    guard=lambda oid=obligation_id, snap=snapshot: _windows(conn, oid) == snap,
+                )
+                if report.get("superseded") or report.get("incomplete", True):
+                    raise HistoryError("not authoritative")
             except _LOOKUP_ERRORS:
                 conn.rollback()
-                append_audit(conn, incident_id=row["incident_id"], kind="webhook_poll_failed", detail=transfer_id, created_at=seen)
-                conn.commit()
-                continue  # unknown remote evidence: stay pending, nothing unlocks
-        current = conn.execute(
-            "SELECT event_id FROM webhook_state WHERE transfer_airwallex_id = ?", (transfer_id,)
-        ).fetchone()
-        if current is not None and current["event_id"] == state["event_id"]:  # a newer event keeps its window
-            conn.execute("DELETE FROM webhook_state WHERE transfer_airwallex_id = ?", (transfer_id,))
-            done.append(transfer_id)
+                if not report.get("superseded"):
+                    append_audit(conn, incident_id=incident_id, kind="webhook_poll_failed",
+                                 detail=str(obligation_id), created_at=seen)
+                    conn.commit()
+                held = True
+                break
+        if held:
+            continue
+        for transfer_id, event_id, *_ in snapshot:  # clear only the exact generation that was read
+            cursor = conn.execute(
+                "DELETE FROM webhook_state WHERE transfer_airwallex_id = ? AND event_id = ?",
+                (transfer_id, event_id),
+            )
+            if cursor.rowcount:
+                done.append(transfer_id)
         conn.commit()
     return done
 
