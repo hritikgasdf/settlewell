@@ -1,11 +1,12 @@
 # Plan to code: final mapping
 
-This maps the build plan (`build-plan.md`, v4 checklist in §5) to the repository. It was rewritten after the P2-8 handoff. Statuses come from reading the current code and from the local verification logs of this round. **No live Airwallex or Claude call was made for this document.** Final test and live results are in `/workspace/settlewell-ctx/final-test-report.md`; this file does not claim a pass.
+This maps the build plan (`build-plan.md`, v4 checklist in §5) to the repository. It was rewritten after the P2-8 handoff. Statuses come from reading the current code and from the local verification logs of this round. **Updated after fresh live sandbox and Claude calls on this box, 2026-11-08 IST.** Final test and live results are in `/workspace/settlewell-ctx/final-test-report.md`; only specifically evidenced paths are PASS; mocked/unverified scopes remain PARTIAL.
 
 ## Status legend
 
 | Label | Meaning |
 |---|---|
+| **PASS** | Specific live/actual evidence in the final report; not certification of all failure branches |
 | **STATIC** | Code and unit tests exist in the repo. They run against fakes. Says nothing about bank behaviour |
 | **PARTIAL** | Code exists; a named gap remains, or the path is not fully traced in current code |
 | **MOCK-ONLY** | Runs only against fakes, canned data or the stateful mock remote |
@@ -27,107 +28,101 @@ The 2026-11-07 audit (`audit-2026-11-07.md`, outside the repo) is **historical**
 | Mock hero (canned replay) | `SETTLEWELL_MOCK=1 uv run python -m backend.scripts.hero_run --mock` | None. Only `approved_replacement` and `reconcile_both` can PASS; the other 7 beats are PARTIAL |
 | Local console (mock) | `bash scripts/run_console.sh` (or `--mode mock --api-port 8877 --ui-port 15173`) | None. `scripts/run_console.sh` is not executable, so run it with `bash` |
 | Local API (mock) | `uv run python -m backend.api --mode mock --db var/settlewell.db --port 8877` | None |
-| Local API (sandbox, operator only) | `uv run python -m backend.api --mode sandbox --db var/hero-sandbox.db` | **Live sandbox: NOT RUN.** SANDBOX writes: guard implemented and targeted MOCK-transport tested (see below) |
-| Sandbox hero (operator only) | `uv run python -m backend.scripts.hero_run --sandbox --confirm-sandbox --manifest var/hero-run-manifest.json --db var/hero-sandbox.db` | **Live sandbox.** Not run for this document |
+| Local API (sandbox, operator only) | `uv run python -m backend.api --mode sandbox --db var/hero-sandbox.db` | **Live sandbox verified:** HTTP outreach approval/replay refusal; no browser money clicks |
+| Sandbox hero (operator only) | `uv run python -m backend.scripts.hero_run --sandbox --confirm-sandbox --manifest var/hero-run-manifest.json --db var/hero-sandbox.db` | **Live sandbox verified on this box** |
 | Owned reset (operator only) | `uv run python -m backend.scripts.hero_run --reset --sandbox --confirm-sandbox --manifest var/hero-run-manifest.json` | **Live sandbox.** Touches only transfers in this run's manifest |
 | Mock reset | `uv run python -m backend.scripts.reset_demo` | None. Removes only an empty or mock hero manifest. It does **not** reset the ledger |
-| Sandbox contract | `SETTLEWELL_SANDBOX=1 uv run python -m backend.scripts.sandbox_contract` | **Live sandbox.** Not run for this document |
+| Sandbox contract | `SETTLEWELL_SANDBOX=1 uv run python -m backend.scripts.sandbox_contract` | **Live sandbox verified on this box** |
 
 ## Credential and live-proof status
 
-| Item | Status |
-|---|---|
-| Live sandbox run for the current tree | **None.** No sandbox or Claude call was made for this document |
-| Registered PC (the operator's machine) | Offline at check time. Part B (live run on that machine) not performed |
-| Sandbox credentials | Present on the box only, by name. Values never read or printed. The box is not the registered PC |
-| `ANTHROPIC_API_KEY` | The live parse path exists; no fresh real call from this tree |
-| Historical proof (2026-11-04, `api-demo`) | Historical. Not current evidence. Details in `README.md` and `docs/rehearsal.md` |
-| Final live PASS | **Not claimed** |
+Fresh sandbox contract, full hero money path and real Claude parse ran on THIS BOX. No registered PC is involved. Credentials were inherited by SDKs; values never read/printed. See [README live proof](../README.md#live-proof--2026-11-08-ist-this-box) for transfer, conversion, quote and beneficiary IDs. The exact final report/evidence is `/workspace/settlewell-ctx/final-test-report.md`. Historical2026-11-04 evidence remains historical.
 
 ## Known limits of the current tree
 
-- **Write guard in SANDBOX:** `backend/api.py` `write_guard` is implemented and targeted MOCK-transport tested. Live sandbox/browser action is still NOT RUN, so do not rely on console writes in SANDBOX mode. MOCK writes are the verified path.
-- **Mock hero:** `hero_run --mock` runs the canned `play_hero` replay. It does not drive the real `Hero` pipeline, and it does not exercise FX, duplicate, bank-change or proof beats. Those show as PARTIAL.
-- **Real `Hero` pipeline:** supports the full sequence in code. Every live step is unverified on the sandbox. Callback attestation is scripted by the finance approver, not a human call-back. Supplier outreach is a queued outbox row, not human contact.
-- **Proof PDF:** the demo PDF is a MOCK / SYNTHETIC document generated locally. It is not the direct bank PDF. Live proof from Airwallex is not verified.
-- **Fees:** no fee quote is captured. Fee figures are conservative estimates.
-- **Webhooks:** the simulator sends signed synthetic events to loopback. Hosted delivery from Airwallex is not verified.
+- SANDBOX HTTP outreach approval200, stale hash409 and replay409 verified. Money approvals executed through hero; browser replacement/FX clicks and visual render not verified.
+- Real hero: actual original return/reversal, duplicate cancel, beneficiary, locked FX and replacement PAID. Callback scripted, outreach queued only, no phone/email delivery.
+- Proof: genuine PAID replacement bank PDF persisted and served HTTP200; mock seed PDFs remain synthetic. Original cancelled URL refused404/no bytes; hero cancellation policy also refused a new proof.
+- Actual payout fee EUR13.50 confirmed by cash history. Conservative pre-send estimate fallback remains; independent provider fee-quote demonstration absent.
+- Hosted webhooks unverified; signed loopback simulator is synthetic.30 incident scenarios/property tests remain mock-only. Live races/timeouts/quote expiry/reuse not induced.
 
 ## 1. The 45 checklist items (build plan §5)
 
-Paraphrased from the plan's ordered checklist. Final statuses are PARTIAL or worse for every item in this round; see the report.
+Paraphrased from the plan's ordered checklist. Final statuses below reflect fresh evidence; see the exhaustive report for scopes and limits.
 
 | # | Item (paraphrase) | Status | Symbols / tests | Gap or note |
 |---|---|---|---|---|
-| 1 | Claude credits in the Console | NOT VERIFIED | none | Console balance not checked |
-| 2 | Private repo with `.gitignore` covering `.env` | NOT VERIFIED | `.gitignore` | Repo visibility not checked |
-| 3 | Airwallex docs MCP in Cursor | PARTIAL | `.cursor/mcp.json` (`airwallex-docs`) | No docs query recorded |
-| 4 | Calendar blocks | NOT VERIFIED | none | Not code |
-| 5 | Optional mail filter | NOT VERIFIED | none | Not code; optional |
-| 6 | Local env (Py 3.12, uv, Node 20, `.env.example`) | PARTIAL | `pyproject.toml`, `.env.example` | `uv` runs locally; `.env` loading not verified |
-| 7 | First sandbox smoke call | LIVE-HIST | historical only | No fresh call |
-| 8 | Airwallex adapter (token, pinned version, throttle, typed results) | STATIC | `backend/airwallex/client.py` `AirwallexClient`; `types.py`; `test_airwallex_client.py`, `test_transport_timeout.py` | Live behaviour unverified |
-| 9 | Sandbox driver and contract | STATIC | `backend/sandbox.py` `SandboxDriver`; `scripts/sandbox_contract.py`; `test_sandbox_driver.py`, `test_reset.py` | Contract not run for this document |
-| 10 | Data model, ledger, seed | STATIC | `backend/ledger.py` `SCHEMA`; `scripts/seed_ledger.py`; `test_ledger.py` | Append-only is a convention, not enforced by the DB |
-| 11 | Poller, reversal join, account-wide index | PARTIAL | `backend/reconcile.py` `poll_incident`; `test_reconcile.py`, `test_reconcile_durable.py` | Account-wide look-alike scan is supplier/beneficiary-scoped (`paid_once.find_matches`); live read unverified |
-| 12 | Policy v1, failure-code table, rule ids | STATIC | `backend/policy.py` `decide`, `FAILURE_ROWS`; `test_policy.py` | Not every execution path calls it |
-| 13 | Claim parser (strict schema) and match | PARTIAL | `backend/claims.py` `parse_email`, `_match`; `test_claims*.py` | Live Claude path not run from this tree |
-| 14 | Account-wide paid-once scan | PARTIAL | `backend/paid_once.py` `scan_paid_once`; `test_paid_once.py` | `find_matches` reads every page (fails closed on a repeated or invalid page token; `test_the_scan_reads_past_250_transfers`) and `_classify` calls a transfer a duplicate only when its beneficiary is in the supplier's `bank_detail_version` rows and invoice, amount and currency match; anything else is AMBIGUOUS. One scenario test plus the pagination test; mock remote only |
-| 15 | WAIT, status-gated proof, ETA, trace draft, reply draft | PARTIAL | `backend/proof.py` `issue_proof`, `describe_eta`, `trace_draft`; `backend/api_proof.py`; `test_proof.py` | Demo PDF is synthetic. Serving checks status, settle window and hash (`api_proof.py`) |
-| 16 | Bound single-use approval | PARTIAL | `backend/approvals.py` `binding_hash`, `approve`; `backend/execute.py`; `test_approvals.py` | Current code binds FX (`fx_quote.py`) and payout (`funding.py`, binding check) paths. Binding checks seen at `fx_quote.py:197` and `funding.py:434`; not exhaustively traced |
-| 17 | Approver ≠ proposer, two identities | STATIC | `approvals.py` `AP_CLERK`, `FINANCE_APPROVER`; `test_approvals.py` | Identities are demo labels; no login |
-| 18 | STOP_DUPLICATE (cancel, €0) | PARTIAL | `backend/stop_duplicate.py`; scenario 3 | Mock cost 0. Live cancel only in the historical run |
-| 19 | REPLACE, lock, `stl-` request id | PARTIAL | `backend/replace_payment.py` `replace_payment`; `test_replace_payment.py` | Two-thread test exists; mock remote only |
-| 20 | One replacement per failure; unknown stays IN_FLIGHT; six-day rule | PARTIAL | `replace_payment.py` (`_DEDUPE_MARGIN` = 6 days, check at line ~438); scenario 14 | The audit's "off by default" claim is not supported by the current code. The enforcement path was not fully traced |
-| 21 | Replacement input = obligation + incident only | STATIC | `backend/replacement_tool.py` `propose_replacement`; `test_replacement_tool.py` | |
-| 22 | Refund-confirmed replacement (N1) | PARTIAL | `replacement_tool.refund_card`; `test_refund_card.py`, `test_funding_refunds.py` | Cash-refund principal/source/currency checks are exercised in mock funding tests; provider evidence is not live-verified |
-| 23 | Bank-change gate: validate, call-back, new beneficiary, diff | PARTIAL | `backend/bank_change.py` `verify_bank_change`, `propose`, `binding_hash`; `test_bank_change.py`; scenarios 7, 9, 26 | Call-back is scripted by the approver, not a human call. Mock remote only |
-| 24 | FX reserve floor and limit | PARTIAL | `backend/fx_funding.py` `fund_replacement`; `test_fx_funding.py`; scenario 24 | The audit's pre-approval conversion claim was not re-traced end to end |
-| 25 | FxQuote single-use and expiry | PARTIAL | `backend/fx_quote.py` `approve_fx_quote`, `execute_fx_quote`; `test_fx_quote.py`; scenario 29 | Current code checks the binding hash before approve and execute |
-| 26 | Colleague already re-paid (N2) | PARTIAL | `backend/repaid.py` `colleague_repaid`; `test_repaid.py`; scenario 6 | Supplier-aware scan and complete-outcome reconciliation are implemented; live behavior unverified |
-| 27 | Webhook receiver | PARTIAL | `backend/webhooks.py` `receive_webhook`, `_verify`, `_apply`; `api.py` POST route; `worker.py`; `test_webhooks.py`, `test_webhook_settle.py` | Apply runs in the request. Retry behaviour untested. No hosted registration |
-| 28 | Console skeleton | PARTIAL | `backend/console.py`; `frontend/` React console; `test_console.py`, `test_api.py`, `test_api_p17.py` | MOCK. SANDBOX write guard implemented and targeted MOCK-transport tested; live sandbox/browser action NOT RUN |
-| 29 | Money ledger, results, FX beat | PARTIAL | `console.py` `_ledger`; `frontend/` | Some result data is seeded |
-| 30 | Visible outbox | PARTIAL | `backend/outbox.py`; `backend/incident_outreach.py`; `test_outbox.py`, `test_incident_outreach.py` | Queue only. Nothing delivered |
-| 31 | Eval harness, first 15 incidents | PARTIAL | `backend/eval_cases.py` `CASES`; `backend/eval_harness.py`; `test_eval_harness.py` | Eval counts are not the runner's PASS |
-| 32 | Remaining 15 incidents | PARTIAL | `backend/eval_rest.py`; `backend/incident_catalog.py`; `backend/incidents.py` `run_all`; `test_incident_catalog.py`, `test_incidents_runner.py` | Runner is authoritative. MOCK |
-| 33 | Property test (Hypothesis) | PARTIAL | `tests/test_properties.py`, `tests/test_incident_properties.py` | Generated machine is mostly REPLACE_SAME; FX fixed |
-| 34 | Seed/reset leaves nothing at SENT | PARTIAL | `backend/reset.py` `reset_demo`; `backend/scripts/reset_demo.py`; `tests/test_reset.py` | Sandbox reset is owned-only (manifest or exact request id) and refuses on uncertainty. Mock reset does not clear the ledger |
-| 35 | One-command local run | PARTIAL | `scripts/run_console.sh`; `settlewell` package (`python -m settlewell`) | Launcher refusal cases were not all run in this round |
-| 36 | Offline mock mode with fidelity table | MOCK-ONLY | `backend/mock_replay.py`; `backend/scripts/hero_run.py --mock`; `test_mock_replay.py`, `test_hero_run.py` | 2 PASS and 7 PARTIAL beats |
-| 37 | README: setup, credit, baseline, limits | PARTIAL | `README.md` (rewritten) | Clean-machine read-through not done |
-| 38 | Code readability pass | PARTIAL | none | No review done for this document |
-| 39 | Feature freeze | NOT VERIFIED | `README.md` freeze section | A declaration, not proof of completeness |
-| 40 | Two rehearsals on real sandbox | LIVE-HIST | `docs/rehearsal.md` | Historical; not re-run |
-| 41 | Rough-cut video and side clips | NOT VERIFIED | none | Not code |
-| 42 | Writeup draft | STATIC | `docs/writeup.md` | Not reviewed in this pass (out of scope) |
-| 43 | Final video and backup | NOT VERIFIED | none | Not code |
-| 44 | Final writeup, clean-machine check, judge access | NOT VERIFIED | none | No access granted by this work |
-| 45 | Form dry-run and submission | NOT VERIFIED | none | No external action taken |
+| 1 | Claude credits in the Console | PARTIAL | none | Credits dashboard not independently checked; successful real API calls prove access, not remaining credits. |
+| 2 | Private repo with `.gitignore` covering `.env` | PASS | `.gitignore` | Actual private repository metadata and gitignored .env verified earlier; no credential files staged. |
+| 3 | Airwallex docs MCP in Cursor | PARTIAL | `.cursor/mcp.json` (`airwallex-docs`) | Docs MCP configuration exists; no fresh docs query. |
+| 4 | Calendar blocks | PARTIAL | none | No calendar action. |
+| 5 | Optional mail filter | PARTIAL | none | Optional mail filter not configured. |
+| 6 | Local env (Py 3.12, uv, Node 20, `.env.example`) | PARTIAL | `pyproject.toml`, `.env.example` | uv/Python/Node work on this box; fresh-machine/env-file setup not tested. |
+| 7 | First sandbox smoke call | PASS | historical only | Fresh contract PASS: p28b-contract-2.log; first attempt returned fee_unknown and was not bypassed. |
+| 8 | Airwallex adapter (token, pinned version, throttle, typed results) | PASS | `backend/airwallex/client.py` `AirwallexClient`; `types.py`; `test_airwallex_client.py`, `test_transport_timeout.py` | Real SDK calls: balance, transfer get/list/create/cancel, beneficiaries, FX, PDF and cash history; live-readback/history JSON. |
+| 9 | Sandbox driver and contract | PASS | `backend/sandbox.py` `SandboxDriver`; `scripts/sandbox_contract.py`; `test_sandbox_driver.py`, `test_reset.py` | Contract SENT→90701→CANCELLED, PDF and full reversal; sandbox simulator, not production bank behavior. |
+| 10 | Data model, ledger, seed | PASS | `backend/ledger.py` `SCHEMA`; `scripts/seed_ledger.py`; `test_ledger.py` | Persisted live execution/approval/funding/audit/proof rows; p28b-final-ledger-evidence.db (outside git). |
+| 11 | Poller, reversal join, account-wide index | PASS | `backend/reconcile.py` `poll_incident`; `test_reconcile.py`, `test_reconcile_durable.py` | Real poll/reversal join and final outcomes; original+replacement accounted for, primary CLOSED. |
+| 12 | Policy v1, failure-code table, rule ids | PARTIAL | `backend/policy.py` `decide`, `FAILURE_ROWS`; `test_policy.py` | Hero policy decisions exercised live; full failure-code table only mock-tested. |
+| 13 | Claim parser (strict schema) and match | PASS | `backend/claims.py` `parse_email`, `_match`; `test_claims*.py` | p28b-claude-proof.json: live Haiku parse and wrong pinned-supplier rejection. |
+| 14 | Account-wide paid-once scan | PASS | `backend/paid_once.py` `scan_paid_once`; `test_paid_once.py` | Live supplier-aware scan found scheduled duplicate; ordinary complete scan exercised. Beyond-page-five/ambiguity regressions remain mock-only. |
+| 15 | WAIT, status-gated proof, ETA, trace draft, reply draft | PARTIAL | `backend/proof.py` `issue_proof`, `describe_eta`, `trace_draft`; `backend/api_proof.py`; `test_proof.py` | Genuine PAID bank PDF HTTP200; cancelled original refused. Outbox queued, trace/ETA and delivery not fully live. |
+| 16 | Bound single-use approval | PARTIAL | `backend/approvals.py` `binding_hash`, `approve`; `backend/execute.py`; `test_approvals.py` | Money approvals1–4 consumed by execute; HTTP outreach replay409. Money concurrency/replay/terms edge cases mock-only. |
+| 17 | Approver ≠ proposer, two identities | PARTIAL | `approvals.py` `AP_CLERK`, `FINANCE_APPROVER`; `test_approvals.py` | ap-clerk/finance-approver are distinct demo labels, not authenticated people. |
+| 18 | STOP_DUPLICATE (cancel, €0) | PASS | `backend/stop_duplicate.py`; scenario 3 | Duplicate d5eae955… CANCELLED via approved execute; complete cash history zero duplicate entries. |
+| 19 | REPLACE, lock, `stl-` request id | PASS | `backend/replace_payment.py` `replace_payment`; `test_replace_payment.py` | Replacement e64445c5… PAID via execute; stored request stl-inv39391662-1 and owning approval4. |
+| 20 | One replacement per failure; unknown stays IN_FLIGHT; six-day rule | PARTIAL | `replace_payment.py` (`_DEDUPE_MARGIN` = 6 days, check at line ~438); scenario 14 | Unknown-send restart, six-day stale snapshot and concurrent replacement tested with mocks, not induced live. |
+| 21 | Replacement input = obligation + incident only | PASS | `backend/replacement_tool.py` `propose_replacement`; `test_replacement_tool.py` | Hero replacement proposed from pinned obligation/original provider terms, then gated execute. |
+| 22 | Refund-confirmed replacement (N1) | PASS | `replacement_tool.refund_card`; `test_refund_card.py`, `test_funding_refunds.py` | Actual cash PAYOUT_REVERSAL EUR4200 for original; source/principal/currency match before replacement. |
+| 23 | Bank-change gate: validate, call-back, new beneficiary, diff | PARTIAL | `backend/bank_change.py` `verify_bank_change`, `propose`, `binding_hash`; `test_bank_change.py`; scenarios 7, 9, 26 | Real new beneficiary created; callback attestation scripted, no phone verification. |
+| 24 | FX reserve floor and limit | PASS | `backend/fx_funding.py` `fund_replacement`; `test_fx_funding.py`; scenario 24 | Locked real quote, conversion SETTLED; EUR after payout10005186.25 ≥ configured floor10005172.75. Demo floor deliberately raised to force FX. |
+| 25 | FxQuote single-use and expiry | PARTIAL | `backend/fx_quote.py` `approve_fx_quote`, `execute_fx_quote`; `test_fx_quote.py`; scenario 29 | Locked quote used once live; reuse/expiry refusal only mock-tested. |
+| 26 | Colleague already re-paid (N2) | PARTIAL | `backend/repaid.py` `colleague_repaid`; `test_repaid.py`; scenario 6 | Colleague already-paid/later-failed scenarios only mock replay. |
+| 27 | Webhook receiver | PARTIAL | `backend/webhooks.py` `receive_webhook`, `_verify`, `_apply`; `api.py` POST route; `worker.py`; `test_webhooks.py`, `test_webhook_settle.py` | Signed loopback simulator tested; no Airwallex-hosted webhook subscription/delivery. Ordering/window/race tests use mocks. |
+| 28 | Console skeleton | PARTIAL | `backend/console.py`; `frontend/` React console; `test_console.py`, `test_api.py`, `test_api_p17.py` | SANDBOX console HTTP200 and API approval200; wrong hash/replay409. No successful browser visual check or browser money clicks. |
+| 29 | Money ledger, results, FX beat | PARTIAL | `console.py` `_ledger`; `frontend/` | Actual cash ledger/fee/FX balances proved; React results rendered in a browser not visually verified. |
+| 30 | Visible outbox | PARTIAL | `backend/outbox.py`; `backend/incident_outreach.py`; `test_outbox.py`, `test_incident_outreach.py` | Actual approved outreach queued; no email delivery integration. |
+| 31 | Eval harness, first 15 incidents | PARTIAL | `backend/eval_cases.py` `CASES`; `backend/eval_harness.py`; `test_eval_harness.py` | Offline scenario/harness assertions only; not live banking. |
+| 32 | Remaining 15 incidents | PARTIAL | `backend/eval_rest.py`; `backend/incident_catalog.py`; `backend/incidents.py` `run_all`; `test_incident_catalog.py`, `test_incidents_runner.py` | 30/30 offline runner,208 checks; all final incident statuses PARTIAL/mock. |
+| 33 | Property test (Hypothesis) | PARTIAL | `tests/test_properties.py`, `tests/test_incident_properties.py` | Property tests pass against mocks; not live stochastic banking evidence. |
+| 34 | Seed/reset leaves nothing at SENT | PASS | `backend/reset.py` `reset_demo`; `backend/scripts/reset_demo.py`; `tests/test_reset.py` | Owned terminal transfers verified and scoped reset succeeded; custom DB and both manifests removed, backups preserved. Unknown-conversion reset not live-tested. |
+| 35 | One-command local run | PARTIAL | `scripts/run_console.sh`; `settlewell` package (`python -m settlewell`) | API/Vite served, but a fresh-machine one-command rehearsal not completed. |
+| 36 | Offline mock mode with fidelity table | PARTIAL | `backend/mock_replay.py`; `backend/scripts/hero_run.py --mock`; `test_mock_replay.py`, `test_hero_run.py` | Offline mock fidelity documented; remains mock, not live proof. |
+| 37 | README: setup, credit, baseline, limits | PARTIAL | `README.md` (rewritten) | README corrected with fresh sandbox IDs/fee and limits; no clean-machine reader verification. |
+| 38 | Code readability pass | PARTIAL | none | Focused live bug reviews/regressions completed; no whole-code independent readability review. |
+| 39 | Feature freeze | PARTIAL | `README.md` freeze section | Feature-freeze declaration only; release process not certified. |
+| 40 | Two rehearsals on real sandbox | PARTIAL | `docs/rehearsal.md` | One complete fresh hero succeeded; earlier partial attempts and historical run are not two fresh complete rehearsals. |
+| 41 | Rough-cut video and side clips | PARTIAL | none | No rough-cut video. |
+| 42 | Writeup draft | PARTIAL | `docs/writeup.md` | Draft exists; final editorial review unverified. |
+| 43 | Final video and backup | PARTIAL | none | No final video/backup. |
+| 44 | Final writeup, clean-machine check, judge access | PARTIAL | none | No clean-machine judge-access/writeup sign-off. |
+| 45 | Form dry-run and submission | PARTIAL | none | No submission/dry-run form action. |
+
 
 ## 2. Must-haves (build plan §2.1, 17 items)
 
 | # | Must-have (paraphrase) | Status | Symbols / tests | Gap |
 |---|---|---|---|---|
-| 1 | Supplier email → schema-validated claim | PARTIAL | `claims.parse_email`; `test_claims*.py` | No email intake; live call not run |
-| 2 | Match claim → obligation → transfer | PARTIAL | `claims._match`; `replacement_tool.py` | `_match` is supplier-scoped and anchors on the obligation's `live_transfer_id`; more than one row is R-AMBIGUOUS, a foreign-supplier invoice is R-IDENTITY-MISMATCH. Downstream transfers are loaded by the reconciler, not the claim match |
-| 3 | Account-wide paid-once guard | PARTIAL | `paid_once.scan_paid_once`; `test_paid_once.py` | Supplier/beneficiary-scoped and paginated (`paid_once.py`); mock remote only |
-| 4 | Live investigation | PARTIAL | `reconcile.poll_incident`; `backend/airwallex/client.py` | Live read unverified |
-| 5 | Deterministic policy engine | PARTIAL | `policy.decide`; `test_policy.py` | Not consulted by every path |
-| 6 | Status-gated proof | PARTIAL | `proof.issue_proof`; `api_proof.py`; scenario 22 | Gate on GET; synthetic PDF |
-| 7 | STOP_DUPLICATE | PARTIAL | `stop_duplicate.py`; scenario 3 | MOCK |
-| 8 | Bank-change gate | PARTIAL | `bank_change.py`; scenarios 7, 9 | Call-back scripted |
-| 9 | Bound single-use approvals | PARTIAL | `approvals.binding_hash`, `approve`; `execute.execute`; `fx_quote.py`; `funding.py` | Not every path re-traced |
-| 10 | No double pay on our side | PARTIAL | `replace_payment.py`; scenarios 13, 14 | External race not tested live |
-| 11 | Reconciler (poll + webhook, closure rule) | PARTIAL | `reconcile.py`; `webhooks.py`; `worker.py`; `outcomes.decide_set` | Poll, `webhooks.settle` and `worker` all decide through `reconcile.poll_incident` → `_decide` → `decide_set` (reconcile.py:458); `repaid.py` uses `reduce_outcome`. Mock only |
-| 12 | Console | PARTIAL | `console.py`; `frontend/` | MOCK, local, no login |
-| 13 | Balance and FX funding check | PARTIAL | `fx_funding.py`; `fx_quote.py`; scenarios 24, 29 | MOCK |
-| 14 | 30-incident harness + property test | PARTIAL | `incidents.py`; `incident_scenarios.py`; `tests/test_properties.py` | MOCK-only |
-| 15 | Runnable demo, video, README | PARTIAL | `README.md`; `scripts/run_console.sh`; `backend.api` | Video NOT VERIFIED; live flow not run |
-| 16 | Money back before money out (N1) | PARTIAL | `replacement_tool.refund_card` | Full cash-refund terms covered by mock tests; live provider reversal unverified |
-| 17 | Colleague already re-paid (N2) | PARTIAL | `repaid.colleague_repaid`; scenario 6 | Supplier-aware payout-boundary scan; live external-payment behavior unverified |
+| 1 | Supplier email → schema-validated claim | PASS | `claims.parse_email`; `test_claims*.py` | p28b-claude-proof.json: live Haiku parse and wrong pinned-supplier rejection. |
+| 2 | Match claim → obligation → transfer | PASS | `claims._match`; `replacement_tool.py` | Hero replacement proposed from pinned obligation/original provider terms, then gated execute. |
+| 3 | Account-wide paid-once guard | PARTIAL | `paid_once.scan_paid_once`; `test_paid_once.py` | Ordinary live scan/duplicate exercised; colleague PAID blocking and ambiguous/beyond-page-five paths mock-only. |
+| 4 | Live investigation | PASS | `reconcile.poll_incident`; `backend/airwallex/client.py` | Real SDK calls: balance, transfer get/list/create/cancel, beneficiaries, FX, PDF and cash history; live-readback/history JSON. |
+| 5 | Deterministic policy engine | PASS | `policy.decide`; `test_policy.py` | Real provider statuses drove WAIT, duplicate cancel, refund-gated replacement and reconciliation in hero. |
+| 6 | Status-gated proof | PARTIAL | `proof.issue_proof`; `api_proof.py`; scenario 22 | Genuine PAID bank PDF HTTP200; cancelled original refused. Outbox queued, trace/ETA and delivery not fully live. |
+| 7 | STOP_DUPLICATE | PASS | `stop_duplicate.py`; scenario 3 | Duplicate d5eae955… CANCELLED via approved execute; complete cash history zero duplicate entries. |
+| 8 | Bank-change gate | PARTIAL | `bank_change.py`; scenarios 7, 9 | Real new beneficiary created; callback attestation scripted, no phone verification. |
+| 9 | Bound single-use approvals | PARTIAL | `approvals.binding_hash`, `approve`; `execute.execute`; `fx_quote.py`; `funding.py` | Money approvals1–4 consumed by execute; HTTP outreach replay409. Money concurrency/replay/terms edge cases mock-only. |
+| 10 | No double pay on our side | PARTIAL | `replace_payment.py`; scenarios 13, 14 | Unknown-send restart, six-day stale snapshot and concurrent replacement tested with mocks, not induced live. |
+| 11 | Reconciler (poll + webhook, closure rule) | PARTIAL | `reconcile.py`; `webhooks.py`; `worker.py`; `outcomes.decide_set` | Original CANCELLED+reversal and replacement PAID close primary incident live; later-return/race branches only mock-tested. |
+| 12 | Console | PARTIAL | `console.py`; `frontend/` | SANDBOX console HTTP200 and API approval200; wrong hash/replay409. No successful browser visual check or browser money clicks. |
+| 13 | Balance and FX funding check | PASS | `fx_funding.py`; `fx_quote.py`; scenarios 24, 29 | Locked real quote, conversion SETTLED; EUR after payout10005186.25 ≥ configured floor10005172.75. Demo floor deliberately raised to force FX. |
+| 14 | 30-incident harness + property test | PARTIAL | `incidents.py`; `incident_scenarios.py`; `tests/test_properties.py` | 30/30 offline runner,208 checks; all final incident statuses PARTIAL/mock. Property tests pass against mocks; not live stochastic banking evidence. |
+| 15 | Runnable demo, video, README | PARTIAL | `README.md`; `scripts/run_console.sh`; `backend.api` | Runnable local console/API observed; video and clean-machine checks missing. |
+| 16 | Money back before money out (N1) | PASS | `replacement_tool.refund_card` | Actual cash PAYOUT_REVERSAL EUR4200 for original; source/principal/currency match before replacement. |
+| 17 | Colleague already re-paid (N2) | PARTIAL | `repaid.colleague_repaid`; scenario 6 | Colleague already-paid/later-failed scenarios only mock replay. |
 
 Should-haves §2.2 (2 items): visible outbox (PARTIAL, `outbox.py`); no-LLM baseline (STATIC, the `README.md` table is a static expectation, not a measured comparison).
+
 
 ## 3. The 30 incidents (build plan §2.5)
 
@@ -168,21 +163,22 @@ Final status for **all 30 is MOCK-ONLY / PARTIAL**, even where the runner shows 
 
 ## 4. Hero demo beats (build plan §2.4, 11 rows)
 
-Beat names follow the plan's time table. Every beat is MOCK-ONLY, LIVE-HIST, or NOT VERIFIED. The mock hero replay exercises only beats 9 and 10 (see the report).
+Beat names follow the plan's time table. Fresh actual path evidence is identified; combined beats with mocked/unverified components stay PARTIAL. The mock hero replay exercises only beats 9 and 10 (see the report).
 
 | # | Beat (plan time) | Code and tests | Status | Gap |
 |---|---|---|---|---|
-| 1 | Cold open, supplier email (0:00) | `claims.parse_email` (offline completer); `mock_replay.py` | MOCK-ONLY | Email text is a constant; live Claude not run |
-| 2 | Investigate, colleague's scheduled duplicate (0:12) | `paid_once.scan_paid_once`; `sc_3` | MOCK-ONLY | Scan is supplier/beneficiary-scoped; mock remote only |
-| 3 | Stop the duplicate, approver ≠ proposer (0:45) | `stop_duplicate.py`; `approvals.py`; `execute.py`; `sc_3`, `sc_11` | MOCK-ONLY; LIVE-HIST for the cancel | Cost 0 proven only in the historical run |
-| 4 | WAIT and proof while SENT, trace draft, outbox (1:08) | `proof.py`; `api_proof.py`; `outbox.py`; `sc_1`, `sc_20` | MOCK-ONLY | PDF synthetic; outbox does not send |
-| 5 | New information: `failed` 90701, resend refused (1:35) | `webhooks._apply`; `proof.py`; `sc_22` | MOCK-ONLY | Replay uses a poll; hosted webhook not verified |
-| 6 | Resolve: validate, call-back, new beneficiary (1:57) | `bank_change.verify_bank_change`; `sc_9` | MOCK-ONLY | Call-back scripted by approver |
-| 7 | Money back first, PAYOUT_REVERSAL (2:20) | `replacement_tool.refund_card`; `sc_5` | MOCK-ONLY | Full-refund mock coverage; no fresh live reversal proof |
-| 8 | Funding and FX on a locked quote; reuse rejected (2:30) | `fx_funding.py`; `fx_quote.py`; `sc_24`, `sc_29` | MOCK-ONLY; LIVE-HIST for one conversion | Mock hero does not run the FX beat |
-| 9 | One bound approval, one replacement, one per failure (2:48) | `approvals.py`; `replace_payment.py`; `sc_13`, `sc_14` | MOCK-ONLY | Mock hero `approved_replacement` PASS is canned replay only |
-| 10 | Result: balances, paid once, incident cost (3:08) | `outcomes.decide_set`; `console.py`; `incidents.py` | MOCK-ONLY | Mock hero `reconcile_both` PASS is canned replay only |
-| 11 | Credit and limits end card (3:40) | `README.md` Honest limits | NOT VERIFIED | Recording not made; no credit action taken |
+| 1 | Cold open, supplier email (0:00) | `claims.parse_email` (offline completer); `mock_replay.py` | PASS | Live Claude Haiku reads synthetic fixture claim and matches pinned supplier (not email identity). |
+| 2 | Investigate, colleague's scheduled duplicate (0:12) | `paid_once.scan_paid_once`; `sc_3` | PASS | Real original SENT and live account scan found separate scheduled duplicate. |
+| 3 | Stop the duplicate, approver ≠ proposer (0:45) | `stop_duplicate.py`; `approvals.py`; `execute.py`; `sc_3`, `sc_11` | PASS | Duplicate d5eae955… CANCELLED via approved execute; complete cash history zero duplicate entries. |
+| 4 | WAIT and proof while SENT, trace draft, outbox (1:08) | `proof.py`; `api_proof.py`; `outbox.py`; `sc_1`, `sc_20` | PARTIAL | Real bank PDF fetched/stored/served. Outreach only queued, ETA estimated, full trace/delivery unverified. |
+| 5 | New information: `failed` 90701, resend refused (1:35) | `webhooks._apply`; `proof.py`; `sc_22` | PARTIAL | Actual sandbox 90701→CANCELLED and full cash reversal; cancelled proof refused. Event injection simulated, not provider webhook delivery. |
+| 6 | Resolve: validate, call-back, new beneficiary (1:57) | `bank_change.verify_bank_change`; `sc_9` | PARTIAL | Real new beneficiary created; callback attestation scripted, no phone verification. |
+| 7 | Money back first, PAYOUT_REVERSAL (2:20) | `replacement_tool.refund_card`; `sc_5` | PASS | Actual cash PAYOUT_REVERSAL EUR4200 for original; source/principal/currency match before replacement. |
+| 8 | Funding and FX on a locked quote; reuse rejected (2:30) | `fx_funding.py`; `fx_quote.py`; `sc_24`, `sc_29` | PARTIAL | Actual quote1006e5ba… + conversion103b9ab7… SETTLED; quote reuse/expiry refusal not exercised against live SDK. |
+| 9 | One bound approval, one replacement, one per failure (2:48) | `approvals.py`; `replace_payment.py`; `sc_13`, `sc_14` | PARTIAL | Real bound approval4 produced exactly one observed PAID replacement. Concurrent/unknown-send/second-money-approval refusal only mock-tested. |
+| 10 | Result: balances, paid once, incident cost (3:08) | `outcomes.decide_set`; `console.py`; `incidents.py` | PARTIAL | Live final bank outcomes, cash fee13.50, reserve and closure proved. 30/30 invariant strip is mock evidence, not 30 bank tests. |
+| 11 | Credit and limits end card (3:40) | `README.md` Honest limits | PARTIAL | README limits documented; credit/end-card/video not recorded. |
+
 
 ## 5. Ordering and closure rules (build plan §3.4 and §2.1 #11/#17)
 
@@ -193,7 +189,7 @@ Beat names follow the plan's time table. Every beat is MOCK-ONLY, LIVE-HIST, or 
 | 3.4-3 `paid` provisional; settle window; later `failed` wins | `webhook_state`; `worker.py` settles windows; `reconcile.py` read | PARTIAL | Window is durable. Worker runs in the local process only |
 | 3.4-4 Store failure reason on receipt | `webhooks._apply` calls `remember_failure_reason` | STATIC | |
 | 3.4-5 Fast 2xx, async processing; polling as backstop | `api.py` POST route; `worker.py` polls every 5 s | PARTIAL | Apply is synchronous in the request. Retry behaviour untested |
-| §2.1 #11 Close only when original and replacement are both accounted for | `outcomes.decide_set`, `reduce_outcome` | PARTIAL | Reconciler paths (poll, webhook settle, worker) call `decide_set`; `repaid.py` calls `reduce_outcome`. Mock only |
+| §2.1 #11 Close only when original and replacement are both accounted for | `outcomes.decide_set`, `reduce_outcome` | PARTIAL | Live poll accounted for original CANCELLED+refund and replacement PAID, then closed primary incident. Webhook/worker/later-failure races remain mock-only |
 | §2.1 #17 Colleague re-paid closes against the external transfer | `repaid.colleague_repaid` | PARTIAL | Supplier-aware scan and outcome reduction; live external-payment behavior unverified |
 
 ## 6. Non-code items (not verified, nothing performed)
@@ -216,9 +212,9 @@ Calendar, credits, video, writeup final, submission form and judge access are **
 | 3 | Audit: FX and payout paths bypass approval | `fx_quote.py` and `funding.py` check the binding hash before execute | Historical. Not every path re-traced |
 | 4 | Audit: six-day rule off by default | `replace_payment.py` `_DEDUPE_MARGIN` = 6 days | Not supported by current evidence; enforcement path not fully traced |
 | 5 | Audit: PDF gate at send not implemented | `api_proof.py` gates the GET serving path | Gate exists on serving; the send path is outbox-only |
-| 6 | Older README: live sandbox proof presented as current | 2026-11-04 run is historical | Relabelled; no final live PASS claimed |
+| 6 | Older README: live sandbox proof presented as current | 2026-11-04 run is historical | Historical run relabelled; new current sandbox IDs/evidence now recorded separately |
 | 7 | Older README: Airwallex kit labels and a "reference" wording | Removed | Generic Airwallex patterns credited |
 | 8 | Older README: outside-repo links and a personal repo slug | Removed | |
 | 9 | Older README: baseline described as a comparison | Static expectation table | Reworded |
 | 10 | Older README: `reset_demo` resets the hero | `reset_demo` now delegates to the scoped hero reset | Mock reset removes only the manifest; the ledger is not reset |
-| 11 | Presence check of three variable names | Blocked by the shell permission gate in an earlier pass | Not checked. Values never read |
+| 11 | Presence check of three variable names | Earlier presence-check gate is not current evidence | SDKs successfully used inherited credentials; values never read |
