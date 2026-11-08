@@ -1,4 +1,6 @@
-# Sandbox rehearsal
+# Sandbox rehearsal (historical record)
+
+These runs were on an earlier tree and were not re-run for the current code. No final live PASS is claimed for the current tree. The final sandbox check for this round was NOT RUN (the requested local test computer was offline).
 
 Two runs on `api-demo.airwallex.com` with the adapter's pinned `x-api-version` `2025-11-11`. `reset_demo` ran before each one. Each payment was 20.00 EUR over SWIFT. No credentials are recorded here.
 
@@ -61,7 +63,7 @@ Total 37876 ms. Pass.
 
 Same end state as run 1: one consumed quote, one conversion, reuse rejected, obligation `PAID_ONCE`, and no non-synthetic `SENT` transfer left.
 
-## Live proof run, 2026-11-04
+## Historical live proof run, 2026-11-04 (earlier tree)
 
 One more run, same host and pinned version, `reset_demo` first, `SETTLEWELL_RESERVE_FLOOR` set so the shortfall was 100.00 EUR. Payment 20.00 EUR SWIFT. Total 37088 ms. Pass. Ids and final statuses:
 

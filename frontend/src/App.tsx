@@ -18,6 +18,20 @@ interface Notice {
   text: string;
 }
 
+/** Plain-language note under the banner for the API mode it reports. */
+function modeNote(mode: string | null): string {
+  switch (mode) {
+    case 'MOCK':
+      return 'Synthetic data. No live money moves. Writes go to the local MOCK ledger only.';
+    case 'SANDBOX':
+      return 'Airwallex sandbox: virtual funds only. Not production and not a live bank.';
+    case 'READ_ONLY':
+      return 'Read only. The API has writes disabled, so actions are unavailable.';
+    default:
+      return 'API mode not known yet. Actions stay disabled until the API reports its mode.';
+  }
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -143,8 +157,10 @@ export default function App() {
     });
   };
 
+  // The API decides whether writes are allowed (writes_enabled); the console only mirrors its mode.
+  const apiMode = detail?.mode ?? list?.mode ?? session?.mode ?? null;
   const writesEnabled =
-    session !== null && session.writes_enabled && (detail?.mode ?? list?.mode ?? session.mode) === 'MOCK';
+    session !== null && session.writes_enabled && (apiMode === 'MOCK' || apiMode === 'SANDBOX');
   const banner = session?.banner ?? list?.banner ?? null;
   const apiDown = sessionError !== null || listError !== null;
 
@@ -160,11 +176,9 @@ export default function App() {
         </span>
       </header>
 
-      <div className="banner" role="note" aria-label="Environment">
-        <strong>{banner ?? 'API not connected. This console runs only against the local demo API.'}</strong>
-        <span className="banner-note">
-          Synthetic data. No live money moves. Writes are enabled only in MOCK mode.
-        </span>
+      <div className="banner" role="note" aria-label="Environment" data-mode={apiMode ?? 'unknown'}>
+        <strong>{banner ?? 'API not connected. This console runs only against the local API.'}</strong>
+        <span className="banner-note">{modeNote(apiMode)}</span>
       </div>
 
       <main className="layout">

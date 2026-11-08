@@ -95,8 +95,32 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+_ACTIVE: list = [None]  # ModeConfig set by create_app; None keeps the env-only MOCK behaviour
+
+
 def mock_enabled() -> bool:
+    """True when writes are allowed: MOCK env, or an explicit writable mode config."""
+    if _ACTIVE[0] is not None:
+        return _ACTIVE[0].writes_enabled
     return os.environ.get("SETTLEWELL_MOCK") == "1"
+
+
+def writes_authorized() -> bool:
+    """MOCK (env or config) or an explicit resolved SANDBOX config. READ_ONLY never; a client factory cannot change this."""
+    active = _ACTIVE[0]
+    if active is None:
+        return os.environ.get("SETTLEWELL_MOCK") == "1"
+    return active.writes_enabled and active.mode in ("MOCK", "SANDBOX")
+
+
+def mode_label() -> str:
+    if _ACTIVE[0] is not None:
+        return _ACTIVE[0].mode
+    return "MOCK" if mock_enabled() else "READ_ONLY"
+
+
+def _banner() -> str:
+    return _ACTIVE[0].banner if _ACTIVE[0] is not None else BANNER
 
 
 # ---- deterministic mock remote that keeps its state in the same SQLite file ----
@@ -243,7 +267,7 @@ def _intent_view(conn, row, operator: str, now: str) -> dict:
          f"expires_at={row['expires_at']}"),
         ("separate_approver", bool(approval) and approval["proposer"] != operator,
          f"proposer={approval['proposer'] if approval else None} operator={operator}"),
-        ("mock_writes_enabled", mock_enabled(), "SETTLEWELL_MOCK=1 required"),
+        ("mock_writes_enabled", mock_enabled(), "writes need MOCK or an explicit SANDBOX mode"),
     ]
     if row["kind"] == "cancel":
         record = conn.execute(
@@ -308,8 +332,8 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
     ).fetchall()
     claim = json.loads(inc["claim_json"]) if inc["claim_json"] else None
     return {
-        "mode": "MOCK" if mock_enabled() else "READ_ONLY",
-        "banner": BANNER,
+        "mode": mode_label(),
+        "banner": _banner(),
         "incident": {"id": inc["id"], "state": inc["state"], "claim": claim,
                      "evidence": {"claim_recorded": claim is not None,
                                   "claim_matched": bool(claim and claim.get("matched") is True)}},
@@ -356,14 +380,16 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
 
 def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
                port: int = DEFAULT_PORT, worker: bool = False, worker_interval: float = 5.0,
-               now_ms=None) -> FastAPI:
+               now_ms=None, mode_config=None, ui_port: int = UI_PORT) -> FastAPI:
     path = db_path or os.environ.get("SETTLEWELL_DB", "var/settlewell.db")
+    _ACTIVE[0] = mode_config
+    sandbox = mode_config is not None and mode_config.mode == "SANDBOX"
     make_client = client_factory or LedgerMockClient
     now = clock or _now
     token = secrets.token_urlsafe(32)
-    origins = {f"http://{h}:{p}" for h in ("127.0.0.1", "localhost") for p in (port, UI_PORT)}
-    if mock_enabled():
-        init_db(path)
+    origins = {f"http://{h}:{p}" for h in ("127.0.0.1", "localhost") for p in (port, ui_port)}
+    if mock_enabled() and not sandbox:
+        init_db(path)  # demo seed + mock_remote are MOCK only; sandbox DBs come from a run manifest
     clock_ms = now_ms or (lambda: int(time.time() * 1000))
     background = None
 
@@ -395,6 +421,11 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         body = {"error": {"code": error.code, "message": error.message, **error.extra}}
         return JSONResponse(body, status_code=error.status)
 
+    @app.exception_handler(PermissionError)
+    async def _read_only(_request, _error):
+        body = {"error": {"code": "read_only", "message": "READ_ONLY: no remote client is configured"}}
+        return JSONResponse(body, status_code=503)
+
     @app.exception_handler(RequestValidationError)
     async def _invalid(_request, _error):
         body = {"error": {"code": "invalid_request", "message": "invalid or unexpected fields"}}
@@ -417,8 +448,8 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         return conn
 
     def write_guard(request: Request) -> None:
-        if not mock_enabled():
-            raise ApiError(503, "writes_disabled", "writes are MOCK/local demo only")
+        if not writes_authorized():
+            raise ApiError(503, "writes_disabled", "writes need MOCK or a validated SANDBOX mode")
         origin = request.headers.get("origin")
         if origin is None:
             raise ApiError(403, "origin_missing", "Origin header required")
@@ -457,14 +488,14 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "mode": "MOCK" if mock_enabled() else "READ_ONLY",
-                "banner": BANNER, "writes_enabled": mock_enabled()}
+        return {"status": "ok", "mode": mode_label(),
+                "banner": _banner(), "writes_enabled": writes_authorized()}
 
     @app.get("/api/session")
     def session():
         return {"operator": OPERATOR, "csrf_token": token, "csrf_header": CSRF_HEADER,
-                "mode": "MOCK" if mock_enabled() else "READ_ONLY", "banner": BANNER,
-                "writes_enabled": mock_enabled(),
+                "mode": mode_label(), "banner": _banner(),
+                "writes_enabled": writes_authorized(),
                 "note": "local demo only; no production authentication"}
 
     @app.get("/api/incidents")
@@ -479,7 +510,7 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
                    FROM incident JOIN obligation ON obligation.id = incident.obligation_id
                    JOIN supplier ON supplier.id = obligation.supplier_id ORDER BY incident.id"""
             ).fetchall()
-            return {"mode": "MOCK" if mock_enabled() else "READ_ONLY", "banner": BANNER,
+            return {"mode": mode_label(), "banner": _banner(),
                     "incidents": [dict(r) for r in rows]}
         finally:
             conn.close()
@@ -490,7 +521,10 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         try:
             detail = _incident_detail(conn, incident_id, OPERATOR)
             if detail is not None:
-                detail["proof"] = api_proof.proof_view(conn, make_client, incident_id)
+                try:
+                    detail["proof"] = api_proof.proof_view(conn, make_client, incident_id)
+                except PermissionError:
+                    raise ApiError(503, "read_only", "READ_ONLY: proof status unavailable") from None
         finally:
             conn.close()
         if detail is None:
@@ -502,6 +536,8 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         conn = db()
         try:
             data, headers = api_proof.load_pdf(conn, make_client, incident_id, document_id)
+        except PermissionError:
+            raise ApiError(503, "read_only", "READ_ONLY: proof unavailable") from None
         except LookupError as error:
             code, status = error.args
             raise ApiError(status, code.split(":")[0], f"proof refused: {code}",
@@ -647,12 +683,37 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--ui-port", type=int, default=UI_PORT,
+                        help="exact loopback UI origin port to allow (1024-65535, default 5173)")
     parser.add_argument("--db", default=os.environ.get("SETTLEWELL_DB", "var/settlewell.db"))
+    parser.add_argument("--mode", choices=("mock", "sandbox"), default="mock",
+                        help="mock (default) or sandbox (exact sandbox URL + sandbox credentials only)")
+    parser.add_argument("--manifest", default="var/hero-run-manifest.json",
+                        help="sandbox mode: hero run manifest that names the seeded DB")
     parser.add_argument("--no-worker", action="store_true", help="disable the periodic worker")
     args = parser.parse_args(argv)
-    os.environ["SETTLEWELL_MOCK"] = "1"  # live money is not available in this API
-    uvicorn.run(create_app(args.db, port=args.port, worker=not args.no_worker), host="127.0.0.1", port=args.port,
-                log_level="warning")
+    if not (1024 <= args.ui_port <= 65535) or not (1024 <= args.port <= 65535):
+        print("refused: ports must be 1024-65535")
+        return 2
+    from backend.api_mode import make_client_factory, resolve_mode
+
+    config = resolve_mode(args.mode)
+    if args.mode == "sandbox":  # bind to the REAL seeded ledger recorded by this run's manifest
+        from backend.hero_live import load_manifest
+
+        owned_db = load_manifest(args.manifest).get("db")
+        if not owned_db:
+            print("refused: no hero run manifest; run backend.scripts.hero_run --sandbox first")
+            return 1
+        args.db = owned_db
+    if config.mode == "MOCK":
+        os.environ["SETTLEWELL_MOCK"] = "1"
+    else:
+        os.environ.pop("SETTLEWELL_MOCK", None)  # SANDBOX / READ_ONLY are never MOCK
+    print("mode", config.mode, "writes", config.writes_enabled, config.reason, ",".join(config.missing))
+    app = create_app(args.db, port=args.port, ui_port=args.ui_port, worker=not args.no_worker and config.writes_enabled,
+                     mode_config=config, client_factory=make_client_factory(config))
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
     return 0
 
 

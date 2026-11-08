@@ -89,11 +89,47 @@ def _require_contract_script() -> None:
     raise SandboxContractError()
 
 
+SANDBOX_BASE = "https://api-demo.airwallex.com"
+HERO_MODULES = ("backend.hero_live", "backend.scripts.hero_run")
+
+
 class SandboxDriver:
-    def __init__(self, client, *, sleep: Sleeper | None = None, attempts: int = 8) -> None:
+    def __init__(self, client, *, sleep: Sleeper | None = None, attempts: int = 8,
+                 confirm_sandbox: bool = False) -> None:
         self._client = client
         self._sleep = sleep or _noop
         self._attempts = attempts
+        self._confirm = confirm_sandbox
+
+    def _require_hero(self) -> None:
+        """Owned fixtures only: explicit confirm, the exact sandbox host, an approved entrypoint."""
+        if not self._confirm or getattr(self._client, "_base_url", None) != SANDBOX_BASE:
+            raise SandboxContractError()
+        for frame in inspect.stack():
+            if frame.frame.f_globals.get("__name__", "") in HERO_MODULES:
+                return
+        raise SandboxContractError()
+
+    def create_owned_beneficiary(self, body):
+        self._require_hero()
+        return self._client.create_beneficiary(body)
+
+    def create_owned_transfer(self, **kwargs) -> Transfer:
+        self._require_hero()
+        return self._client.create_transfer(**kwargs)
+
+    def reach(self, transfer_id: str, status: str) -> Transfer:
+        self._require_hero()
+        return self._reach(transfer_id, status)
+
+    def fail_account_closed(self, transfer_id: str) -> Transfer:
+        """Simulate the bank return on an owned SENT transfer; poll until CANCELLED/90701."""
+        self._require_hero()
+        self.transition(transfer_id, "FAILED", "ACCOUNT_CLOSED")
+        return self._until(transfer_id, _account_closed)
+
+    def reversal_joined(self, transfer_id: str, currency: str) -> bool:
+        return self._reversal_joined(transfer_id, currency)
 
     def list_remote_sent(self) -> list[str]:
         """List sandbox transfers at SENT. Stops after a fixed number of pages."""
