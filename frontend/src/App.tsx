@@ -8,6 +8,7 @@ import {
   listIncidents,
   loadSession,
   rejectProposal,
+  resetDemo,
 } from './api';
 import { IncidentListPanel } from './components/IncidentList';
 import { IncidentDetailPanel } from './components/IncidentDetail';
@@ -157,6 +158,29 @@ export default function App() {
     });
   };
 
+  const handleReset = (): void => {
+    if (!window.confirm('Reset the demo to its starting state? This clears every action taken so far.')) return;
+    setBusy('reset');
+    setNotice(null);
+    resetDemo()
+      .then(async (r) => {
+        setNotice({
+          tone: 'ok',
+          text:
+            r.state === 'running'
+              ? 'Sandbox rerun started in the background. Refresh in a few minutes to see the new run.'
+              : 'Demo reset: INV-2291 is back to its starting state.',
+        });
+        const l = await listIncidents();
+        setList(l);
+        const first = l.incidents.length > 0 ? l.incidents[0].id : null;
+        setSelectedId(first);
+        if (first !== null) await refreshDetail(first);
+      })
+      .catch((e: unknown) => setNotice({ tone: 'error', text: `Reset not applied: ${describeError(e)}` }))
+      .finally(() => setBusy(null));
+  };
+
   // The API decides whether writes are allowed (writes_enabled); the console only mirrors its mode.
   const apiMode = detail?.mode ?? list?.mode ?? session?.mode ?? null;
   const writesEnabled =
@@ -171,6 +195,15 @@ export default function App() {
           <span className="brand-name">Settlewell</span>
           <span className="brand-sub">Operator console</span>
         </div>
+        <button
+          type="button"
+          className="btn btn-reset"
+          onClick={handleReset}
+          disabled={!writesEnabled || busy !== null}
+          title="Put the demo back to its starting state so it can be run again"
+        >
+          {busy === 'reset' ? 'Resetting…' : 'Reset demo'}
+        </button>
         <span className={apiDown ? 'conn conn-down' : 'conn conn-up'} role="status">
           {apiDown ? 'API unreachable' : session ? 'Connected' : 'Connecting…'}
         </span>

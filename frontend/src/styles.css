@@ -603,3 +603,9 @@ input:focus-visible {
   flex-direction: column;
   gap: 16px;
 }
+
+/* Hosted demo: reset sits next to the connection pill */
+.btn-reset {
+  margin-left: auto;
+  margin-right: 12px;
+}
