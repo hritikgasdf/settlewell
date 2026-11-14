@@ -489,8 +489,7 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
     async def _host_guard(request: Request, call_next):
         if request.url.path == hosting_mod.HEALTH_PATH:  # platform health checks use their own Host
             return await call_next(request)
-        raw = request.headers.get("host") or ""
-        host = raw[: raw.index("]") + 1] if raw.startswith("[") and "]" in raw else raw.split(":")[0]
+        host = hosting_mod.host_of(request.headers.get("host") or "")
         if host not in allowed_hosts:
             return JSONResponse({"error": {"code": "forbidden_host", "message": host_message}},
                                 status_code=403)

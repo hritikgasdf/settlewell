@@ -1,9 +1,11 @@
 """Hosted demo: allowed hosts/origins, passcode gate, /health, static UI, reset. Offline."""
 
+import asyncio
 import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from backend import hosted
 from backend.api import create_app
@@ -106,6 +108,22 @@ def test_host_of():
     assert host_of("[::1]:8765") == "[::1]"
 
 
+def test_public_host_is_case_insensitive(tmp_path):
+    """HTTP hosts are case-insensitive; mixed-case Host must still be allowed."""
+    app = create_app(str(tmp_path / "demo.db"), hosting=_hosting())
+
+    async def hit(host: str):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://example.invalid") as ac:
+            return await ac.get("/api/incidents", headers={"host": host}, follow_redirects=False)
+
+    ok = asyncio.run(hit("Settlewell-Demo.up.railway.app"))
+    assert ok.status_code == 200
+    assert ok.json()["incidents"][0]["invoice_ref"] == "INV-2291"
+    bad = asyncio.run(hit("evil.example"))
+    assert bad.status_code == 403 and bad.json()["error"]["code"] == "forbidden_host"
+
+
 # ---- passcode gate ----
 
 
@@ -163,6 +181,25 @@ def test_webhook_path_is_not_behind_the_gate(tmp_path):
     client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS))
     r = client.post("/api/webhooks/airwallex", content=b"{}")
     assert r.json()["error"]["code"] != "passcode_required"  # its own HMAC check answers
+
+
+@pytest.mark.parametrize("path,method", [
+    ("/", "POST"), ("/index.html", "GET"), ("/assets/app.js", "GET"),
+    ("/api/incidents", "GET"), ("/api/incidents/", "GET"), ("/api/session", "OPTIONS"),
+    ("/api/demo/reset", "POST"), ("/api/demo/status", "GET"),
+    ("/health/", "GET"), ("/login/", "POST"),
+    ("/health/../api/incidents", "GET"), ("/login/../api/incidents", "GET"),
+    ("//api/incidents", "GET"), ("/openapi.json", "GET"),
+])
+def test_gate_holds_for_path_tricks_and_methods(tmp_path, path, method):
+    client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS))
+    r = client.request(method, path, headers={"Origin": PUBLIC}, follow_redirects=False)
+    assert r.status_code in (401, 303)
+    if r.status_code == 401:
+        assert r.json()["error"]["code"] == "passcode_required"
+    else:
+        assert r.headers["location"] == "/login"
+    assert PASS not in (r.text or "")
 
 
 def test_passcode_compare_and_limiter():
