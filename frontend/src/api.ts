@@ -88,6 +88,10 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown, 
   if (res.ok) return data as T;
 
   const err = errorBody(data);
+  // Hosted demo: the passcode session expired. Send the operator back to the sign-in page.
+  if (res.status === 401 && err?.code === 'passcode_required' && !isPost) {
+    window.location.assign('/login');
+  }
   const rawCode = err?.code;
   const rawMessage = err?.message;
   const rawGate = err?.gate_code;
@@ -162,4 +166,15 @@ export function cancelTransfer(incidentId: number, transferId: number): Promise<
   return post<ProposalActionResponse>(`/api/incidents/${incidentId}/transfers/${transferId}/cancel`, {
     expected_status: 'SCHEDULED',
   });
+}
+
+export interface DemoResetResponse {
+  ok: boolean;
+  state: 'done' | 'running';
+  mode: string;
+}
+
+/** Reruns the demo. MOCK reseeds the synthetic ledger; SANDBOX starts a background hero rerun. */
+export function resetDemo(): Promise<DemoResetResponse> {
+  return post<DemoResetResponse>('/api/demo/reset', {});
 }

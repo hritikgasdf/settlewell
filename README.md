@@ -26,7 +26,7 @@ Read this table before any claim in the README, the plan or a recording.
 | Production use | **Unsupported.** No production credentials, hosting, monitoring or key management exist | Not offered |
 | Claim parser | **Live Claude verified** on this box with `claude-haiku-4-5-20251001`; strict validation and pinned-supplier matching retained. Offline tests use a deterministic completer | Model proposes only; no money tools |
 | Beneficiary change | A person enters the call-back attestation text. Software does not verify the call-back or the bank | Attestation recorded, not verified |
-| User authentication | **None.** The console has no login. Writes need a loopback Host, an allowed Origin and a per-process CSRF token. Approver identities are demo labels | MOCK |
+| User authentication | **None locally; a shared demo passcode when hosted** (see [Hosted demo](#hosted-demo)). No per-user login. Writes need a loopback Host, an allowed Origin and a per-process CSRF token. Approver identities are demo labels | MOCK |
 | Replay (`/replay`) | **MOCK.** Canned statuses, letter, `PAYOUT_REVERSAL` and quote rate | MOCK |
 | 30-incident eval and runner | **Offline MOCK.** No Airwallex call, no secrets | MOCK |
 | Hero scenario world setup | **Sandbox-only seed** (`Hero.seed_scenario_world`): only the pre-existing world is created directly: prerequisite original beneficiary, original payment, colleague duplicate. It refuses outside the confirmed sandbox before any remote write. Every Settlewell action (duplicate cancel, new-bank beneficiary, replacement, FX, and any cancel done by `--reset`) runs through `execute()` with a bound single-use approval. Simulated bank outcomes (`SandboxDriver` SENT/return) are scenario stimuli, not app actions | SANDBOX only; never MOCK or production |
@@ -62,6 +62,29 @@ Fresh real requests to the Airwallex **sandbox** completed the hero money path. 
 - Mock runner: 30/30, 208 checks (**not** 30 live bank scenarios). Full local mock suite: 612 passed before the last focused PDF/reset fixes; their targeted regressions pass. Final-head CI is authoritative for the combined suite.
 - Signed webhook simulator exercised loopback HTTP, not provider-hosted delivery. Scoped reset verified owned terminal transfers and removed only this run's DB/manifests; evidence was preserved outside git.
 - One headless screenshot attempt timed out; no screenshot or video is claimed. Callback, email delivery, hosted webhooks, live concurrency/timeouts/quote replay/expiry and production operation remain unverified or simulated.
+
+## Hosted demo
+
+**URL:** `https://<your-service>.up.railway.app` (placeholder until deployed). Ask the team for the demo passcode.
+
+One container serves the API and the built React console on the same origin (`Dockerfile`, `railway.json`). Start command: `python -m backend.hosted`, listening on `0.0.0.0:$PORT` (default 8080). Railway health check: `GET /health`.
+
+- **Passcode gate.** With `SETTLEWELL_DEMO_PASSCODE` set, every page and API route except `/health` (and the HMAC-signed `/api/webhooks/airwallex`) needs the passcode. `/login` sets an HttpOnly, Secure, SameSite=Strict signed cookie for 12 hours. Failed attempts are rate limited per client and globally. Sandbox mode refuses to start without a passcode.
+- **Same safety model.** Writes still need an allowed Host, an allowed Origin and the per-process CSRF token, and every money action still goes through `execute()` with a bound, single-use approval. `SETTLEWELL_PUBLIC_ORIGIN` (or Railway's `RAILWAY_PUBLIC_DOMAIN`, picked up automatically) adds the public host and origin; `SETTLEWELL_ALLOWED_HOSTS` adds extra exact hosts. With none of these set, the API is loopback-only as before.
+- **Mock mode** (`SETTLEWELL_MODE=mock`, default): seeds Lumen Textiles / INV-2291 with a pending duplicate-stop proposal on every boot. **Reset demo** in the console header (or `POST /api/demo/reset`, CSRF-guarded) wipes and reseeds the synthetic ledger so judges can rerun it.
+- **Sandbox mode** (`SETTLEWELL_MODE=sandbox`): needs `AIRWALLEX_SANDBOX_CLIENT_ID`, `AIRWALLEX_SANDBOX_API_KEY` and `ANTHROPIC_API_KEY`. With `SETTLEWELL_SANDBOX_AUTORUN=1`, the live sandbox hero runs once on first boot, and **Reset demo** releases or cancels only this run's own transfers (cancels go through `execute()`) and then reruns the hero in the background (at most once every 2 minutes; progress at `GET /api/demo/status`). Without it, the console shows the run recorded in the data directory, read from the hero manifest.
+- **Data.** SQLite at `SETTLEWELL_DB` (default `/data/settlewell.db` when a `/data` volume is mounted, else `/tmp/settlewell/settlewell.db`). Sandbox runs keep `hero-run-manifest.json` and `hero-sandbox.db` beside it.
+
+Run the same image locally:
+
+```bash
+docker build -t settlewell .
+docker run --rm -p 8080:8080 -e SETTLEWELL_DEMO_PASSCODE=pick-one \
+  -e SETTLEWELL_PUBLIC_ORIGIN=http://localhost:8080 settlewell
+# open http://localhost:8080 and enter the passcode
+```
+
+Without Docker: `cd frontend && npm ci && npm run build && cd .. && PORT=8080 SETTLEWELL_DEMO_PASSCODE=pick-one SETTLEWELL_PUBLIC_ORIGIN=http://localhost:8080 uv run python -m backend.hosted`.
 
 ## Setup
 
@@ -259,5 +282,10 @@ Variable names only (values never go in the repo):
 | `ANTHROPIC_API_KEY` | Claude claim parser (live path) |
 | `AIRWALLEX_WEBHOOK_SECRET` | Webhook signature check (missing or blank returns 503) |
 | `SETTLEWELL_MOCK`, `SETTLEWELL_SANDBOX`, `SETTLEWELL_DB` | Mode and ledger path |
+| `ANTHROPIC_MODEL` | Optional claim-parser model override (defaults to the Haiku model in `backend/claims.py`) |
+| `PORT`, `SETTLEWELL_MODE` | Hosted demo: listen port and `mock` or `sandbox` |
+| `SETTLEWELL_DEMO_PASSCODE`, `SETTLEWELL_SESSION_SECRET` | Hosted demo: passcode gate and optional cookie-signing secret |
+| `SETTLEWELL_PUBLIC_ORIGIN`, `SETTLEWELL_ALLOWED_HOSTS` | Hosted demo: public origin and extra exact Host names |
+| `SETTLEWELL_STATIC_DIR`, `SETTLEWELL_RESET_ON_BOOT`, `SETTLEWELL_SANDBOX_AUTORUN` | Hosted demo: built UI path, mock reseed on boot (default on), sandbox hero autorun and rerun (default off) |
 
 For cloud agents, add the sandbox variables as runtime secrets in the agent dashboard, then start a new agent; a running agent does not see secrets added later. For local Cursor, export the same variables in the environment Cursor starts with, then reload MCP.

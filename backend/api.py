@@ -3,6 +3,11 @@
 There is no production authentication here. The operator is server-controlled, writes
 need loopback Host, an allowed Origin and a per-process CSRF token, and writes are
 refused unless SETTLEWELL_MOCK=1. GET handlers never write.
+
+Hosted demo (backend.hosted): SETTLEWELL_ALLOWED_HOSTS / SETTLEWELL_PUBLIC_ORIGIN add exact
+hosts and origins, SETTLEWELL_DEMO_PASSCODE puts a passcode gate in front of every page and
+route except /health, and SETTLEWELL_STATIC_DIR serves the built UI on the same origin. With
+none of them set, behaviour is the loopback-only local demo.
 """
 
 from __future__ import annotations
@@ -20,10 +25,11 @@ from decimal import Decimal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend import api_proof
+from backend import hosting as hosting_mod
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import CancelResult, Transfer
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, binding_hash
@@ -180,6 +186,27 @@ def init_db(path: str) -> None:
         conn.executescript(api_proof.PROOF_BLOB)  # additive; existing rows are untouched
         if conn.execute("SELECT COUNT(*) AS n FROM incident").fetchone()["n"] == 0:
             _seed_demo(conn)
+    finally:
+        conn.close()
+
+
+def reset_mock_demo(path: str) -> None:
+    """MOCK only: wipe every table of the synthetic demo DB and reseed INV-2291.
+
+    Table names come from sqlite_master, never from input. No remote call is made."""
+    conn = connect(path)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        names = [r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")]
+        for name in names:
+            conn.execute(f'DELETE FROM "{name}"')
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'").fetchone():
+            conn.execute("DELETE FROM sqlite_sequence")
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys = ON")
+        _seed_demo(conn)
     finally:
         conn.close()
 
@@ -380,14 +407,22 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
 
 def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
                port: int = DEFAULT_PORT, worker: bool = False, worker_interval: float = 5.0,
-               now_ms=None, mode_config=None, ui_port: int = UI_PORT) -> FastAPI:
+               now_ms=None, mode_config=None, ui_port: int = UI_PORT, hosting=None,
+               sandbox_demo=None) -> FastAPI:
     path = db_path or os.environ.get("SETTLEWELL_DB", "var/settlewell.db")
+    host_cfg = hosting if hosting is not None else hosting_mod.Hosting.from_env()
     _ACTIVE[0] = mode_config
     sandbox = mode_config is not None and mode_config.mode == "SANDBOX"
     make_client = client_factory or LedgerMockClient
     now = clock or _now
     token = secrets.token_urlsafe(32)
     origins = {f"http://{h}:{p}" for h in ("127.0.0.1", "localhost") for p in (port, ui_port)}
+    origins |= set(host_cfg.public_origins)
+    allowed_hosts = LOOPBACK | set(host_cfg.allowed_hosts)
+    hosted = bool(host_cfg.allowed_hosts or host_cfg.public_origins or host_cfg.gate_enabled
+                  or host_cfg.static_dir)
+    limiter = hosting_mod.LoginLimiter()
+    host_message = "host not allowed" if host_cfg.allowed_hosts else "loopback only"
     if mock_enabled() and not sandbox:
         init_db(path)  # demo seed + mock_remote are MOCK only; sandbox DBs come from a run manifest
     clock_ms = now_ms or (lambda: int(time.time() * 1000))
@@ -431,14 +466,76 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         body = {"error": {"code": "invalid_request", "message": "invalid or unexpected fields"}}
         return JSONResponse(body, status_code=400)
 
+    # Middleware added later runs first: host guard -> passcode gate -> routes.
+    @app.middleware("http")
+    async def _passcode_gate(request: Request, call_next):
+        path_ = request.url.path
+        if host_cfg.gate_enabled and path_ not in hosting_mod.GATE_EXEMPT:
+            cookie = request.cookies.get(hosting_mod.COOKIE_NAME)
+            if not hosting_mod.cookie_valid(host_cfg.session_secret, cookie):
+                if hosting_mod.is_api_path(path_) or request.method != "GET":
+                    return JSONResponse(
+                        {"error": {"code": "passcode_required", "message": "demo passcode required"}},
+                        status_code=401)
+                return RedirectResponse(hosting_mod.LOGIN_PATH, status_code=303)
+        response = await call_next(request)
+        if hosted:
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
+
     @app.middleware("http")
     async def _host_guard(request: Request, call_next):
-        raw = request.headers.get("host") or ""
-        host = raw[: raw.index("]") + 1] if raw.startswith("[") and "]" in raw else raw.split(":")[0]
-        if host not in LOOPBACK:
-            return JSONResponse({"error": {"code": "forbidden_host", "message": "loopback only"}},
+        if request.url.path == hosting_mod.HEALTH_PATH:  # platform health checks use their own Host
+            return await call_next(request)
+        host = hosting_mod.host_of(request.headers.get("host") or "")
+        if host not in allowed_hosts:
+            return JSONResponse({"error": {"code": "forbidden_host", "message": host_message}},
                                 status_code=403)
         return await call_next(request)
+
+    @app.get(hosting_mod.HEALTH_PATH)
+    def platform_health():
+        return {"status": "ok", "mode": mode_label()}
+
+    if host_cfg.gate_enabled:
+
+        @app.get(hosting_mod.LOGIN_PATH)
+        def login_form():
+            return HTMLResponse(hosting_mod.login_page(), headers={"Cache-Control": "no-store"})
+
+        @app.post(hosting_mod.LOGIN_PATH)
+        async def login_submit(request: Request):
+            origin = request.headers.get("origin")
+            if origin is not None and origin not in origins:
+                raise ApiError(403, "origin_forbidden", "Origin not allowed")
+            who = hosting_mod.client_key(request)
+            if limiter.blocked(who):
+                return HTMLResponse(hosting_mod.login_page("Too many attempts. Wait a few minutes."),
+                                    status_code=429, headers={"Retry-After": "300"})
+            raw = await request.body()
+            if len(raw) > hosting_mod.MAX_LOGIN_BODY:
+                raise ApiError(413, "body_too_large", "body too large")
+            from urllib.parse import parse_qs
+
+            supplied = (parse_qs(raw.decode("utf-8", "replace")).get("passcode") or [""])[0]
+            if not hosting_mod.passcode_ok(host_cfg.passcode, supplied):
+                limiter.fail(who)
+                return HTMLResponse(hosting_mod.login_page("Wrong passcode."), status_code=401,
+                                    headers={"Cache-Control": "no-store"})
+            response = RedirectResponse("/", status_code=303)
+            response.set_cookie(hosting_mod.COOKIE_NAME, hosting_mod.make_cookie(host_cfg.session_secret),
+                                max_age=hosting_mod.COOKIE_TTL_S, path="/", httponly=True,
+                                secure=True, samesite="strict")
+            return response
+
+        @app.post(hosting_mod.LOGOUT_PATH)
+        def logout():
+            response = RedirectResponse(hosting_mod.LOGIN_PATH, status_code=303)
+            response.delete_cookie(hosting_mod.COOKIE_NAME, path="/", secure=True, httponly=True,
+                                   samesite="strict")
+            return response
 
     def db():
         if not os.path.exists(path):
@@ -672,6 +769,37 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
                 return _gate(conn, client, existing)
             finally:
                 conn.close()
+
+    @app.get("/api/demo/status")
+    def demo_status():
+        if sandbox:
+            return {"mode": mode_label(), "resettable": sandbox_demo is not None,
+                    **(sandbox_demo.status() if sandbox_demo is not None else {})}
+        return {"mode": mode_label(), "resettable": mock_enabled(), "state": "idle"}
+
+    @app.post("/api/demo/reset")
+    def demo_reset(request: Request):
+        """Rerun the demo. MOCK: wipe and reseed the synthetic DB. SANDBOX: release/cancel this
+        run's own transfers (cancels go through execute()) and run the hero again in the
+        background. Same Origin + CSRF guard as every other write."""
+        write_guard(request)
+        if not sandbox:
+            with _write_lock:
+                reset_mock_demo(path)
+            return {"ok": True, "state": "done", "mode": mode_label()}
+        if sandbox_demo is None:
+            raise ApiError(409, "reset_unavailable",
+                           "sandbox rerun is disabled; set SETTLEWELL_SANDBOX_AUTORUN=1 on the host")
+        started, reason = sandbox_demo.start(reset=True)
+        if not started:
+            raise ApiError(409, "reset_refused", reason)
+        return JSONResponse({"ok": True, "state": "running", "mode": mode_label()}, status_code=202)
+
+    static = hosting_mod.resolve_static_dir(host_cfg.static_dir)
+    if static is not None:
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", StaticFiles(directory=str(static), html=True), name="ui")
 
     return app
 

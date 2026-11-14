@@ -21,6 +21,8 @@
 - `backend/airwallex/http.py` — HTTP types for the Airwallex adapter. No credentials are logged.
 - `backend/airwallex/types.py` — Typed Airwallex results. Money is Decimal so fees such as 13.47 stay exact.
 - `backend/api.py` — Local-demo FastAPI (MOCK only). Writes call execute(); loopback, Origin and CSRF guarded. Start: `uv run python -m backend.api`.
+- `backend/hosted.py` — Hosted demo entrypoint `python -m backend.hosted`: one process, API + built UI on 0.0.0.0:$PORT; mock reseed, sandbox hero autorun/rerun.
+- `backend/hosting.py` — Hosted-demo settings: allowed hosts/origins, passcode gate (signed cookie, rate limit), static UI dir.
 - `backend/api_proof.py` — Gated MOCK/SYNTHETIC proof PDF for the demo API. Status-gated; never Airwallex proof.
 - `backend/incident_catalog.py` — The 30-incident plan catalog: expected actions and stage evidence.
 - `backend/incident_outreach.py` — Non-money `outreach` intents (reply/TRACE/escalate): bound approval, execute(), outbox only.
