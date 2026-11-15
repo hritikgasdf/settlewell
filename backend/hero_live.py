@@ -281,7 +281,7 @@ class Hero:
         result = parse_email(email, complete, self.conn, supplier_id=int(self.m["ids"]["supplier_row"]))
         if result.escalated or result.obligation_id != ob or result.claim is None:
             raise HeroError("claim_" + result.rule_id)
-        # Safe parse provenance only: model name and token counts, never the prompt or raw reply.
+        # Safe parse provenance only: source and model name, never the prompt or raw reply.
         parse = {"source": "claude" if meta.get("model") else "injected_test_parser",
                  "model": meta.get("model"), "rule_id": result.rule_id,
                  "summary": "Model proposed JSON only; code matched invoice, amount and currency "
