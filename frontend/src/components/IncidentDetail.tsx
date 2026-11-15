@@ -149,6 +149,7 @@ export function IncidentDetailPanel(props: Props) {
   const parseInfo = d.incident.claim ? (d.incident.claim.parse as ParseInfo | undefined) : undefined;
   const statusOf = (recordId: number) => d.transfers.find((t) => t.id === recordId)?.status;
   const mockProof = d.proof.documents.some((doc) => doc.origin === 'mock_synthetic') || (!live && d.proof.documents.length === 0);
+  const letterProof = d.proof.documents.some((doc) => doc.origin === 'airwallex_confirmation_letter');
 
   return (
     <div className="detail">
@@ -173,8 +174,8 @@ export function IncidentDetailPanel(props: Props) {
         </div>
         {live ? (
           <p className="demo-note small">
-            Live Airwallex sandbox run (virtual funds): the payments, cancel, bank return and replacement below were made
-            against the Airwallex sandbox.
+            Live Airwallex sandbox run (virtual funds): the payments and events below are recorded from Airwallex sandbox
+            calls, not seeded demo data.
           </p>
         ) : (
           <p className="demo-note small">
@@ -321,8 +322,10 @@ export function IncidentDetailPanel(props: Props) {
         ) : null}
         <p className="small muted">
           {mockProof
-            ? 'Stored proof is a MOCK / SYNTHETIC demo document. It is not Airwallex proof and not bank or network confirmation.'
-            : 'Stored proof is an Airwallex sandbox confirmation letter (virtual funds), not production bank confirmation.'}{' '}
+            ? 'Stored proof is a MOCK / SYNTHETIC demo document. It is not Airwallex proof and not bank or network confirmation. '
+            : letterProof
+              ? 'Stored proof is an Airwallex sandbox confirmation letter (virtual funds), not production bank confirmation. '
+              : ''}
           If the status changed after this page loaded, the link can return an error; reload the incident.
         </p>
       </Card>
@@ -426,11 +429,9 @@ export function IncidentDetailPanel(props: Props) {
               ) : (
                 <Empty>
                   {d.proposals.length > 0
-                    ? `No policy-engine decisions were recorded for this incident${
-                        live ? ': this live sandbox run opened its proposals directly from the scripted hero run' : ''
-                      }. See Proposals above (${d.proposals.length}, each with its own approval) and the Audit tab (${
-                        d.audit.length
-                      } entries).`
+                    ? `No policy-engine decisions were recorded for this incident. Its proposals are listed above (${
+                        d.proposals.length
+                      }) and its recorded steps are in the Audit tab (${d.audit.length} entries).`
                     : 'No decisions recorded.'}
                 </Empty>
               )
