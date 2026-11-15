@@ -250,6 +250,9 @@ class SandboxDriver:
             if current.status == status:
                 return current
             self._sleep(0.5)
+            current = self._client.get_transfer(transfer_id)  # read back before any re-ask
+            if current.status == status or current.status in _TERMINAL:
+                return current
             current = self.transition(transfer_id, status)
         return current
 
@@ -337,6 +340,9 @@ def _account_closed(transfer: Transfer) -> bool:
     return transfer.status == "CANCELLED" and bool(
         transfer.failure_reason and transfer.failure_reason.startswith("90701")
     )
+
+
+_TERMINAL = frozenset({"PAID", "FAILED", "CANCELLED"})
 
 
 def _noop(_seconds: float) -> None:

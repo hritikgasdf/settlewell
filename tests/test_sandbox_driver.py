@@ -206,6 +206,8 @@ class SettlingApi:
             if self.left <= 0:
                 self.status = "PROCESSING"
             raise AirwallexError(500, "operation_failed", "simulation")
+        if self.status == "CANCELLED":
+            raise AirwallexError(500, "operation_failed", "simulation")
         self.status = body["next_status"]
         return {"id": "tr_new", "status": self.status}
 
@@ -213,7 +215,7 @@ class SettlingApi:
         return parse_transfer({"id": "tr_new", "status": self.status})
 
 
-def test_reach_retries_transition_once_transfer_leaves_scheduled():
+def test_reach_retries_transition_after_transfer_leaves_scheduled():
     api = SettlingApi(scheduled_polls=2)
     result = SandboxDriver(api, confirm_sandbox=True)._reach("tr_new", "SENT")
     assert result.status == "SENT"
@@ -224,3 +226,10 @@ def test_reach_gives_up_after_attempts():
     api = SettlingApi(scheduled_polls=100)
     result = SandboxDriver(api, attempts=3, confirm_sandbox=True)._reach("tr_new", "SENT")
     assert result.status == "SCHEDULED" and api.posts == 4
+
+
+def test_reach_stops_on_terminal_status():
+    api = SettlingApi(scheduled_polls=100)
+    api.status = "CANCELLED"
+    result = SandboxDriver(api, confirm_sandbox=True)._reach("tr_new", "SENT")
+    assert result.status == "CANCELLED" and api.posts == 1
