@@ -165,7 +165,13 @@ export function IncidentDetailPanel(props: Props) {
       <Card id="bank-title" title="Bank details">
         {d.pinned_bank ? (
           <p className="small">
-            <strong>Pinned bank</strong> (beneficiary {d.pinned_bank.beneficiary_id}) is the only version used for payment.
+            <strong>Pinned bank</strong>
+            {d.pinned_bank.beneficiary_id
+              ? ` (beneficiary ${d.pinned_bank.beneficiary_id})`
+              : d.pinned_bank.bank_name
+                ? ` (${d.pinned_bank.bank_name})`
+                : ''}{' '}
+            is the only version used for payment.
           </p>
         ) : (
           <p className="alert notice-warn">No pinned bank is recorded for this supplier. Nothing can be paid to a new account.</p>

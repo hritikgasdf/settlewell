@@ -245,6 +245,37 @@ def test_static_ui_served_behind_gate(tmp_path):
     assert client.get("/api/health").json()["mode"] == "MOCK"  # API routes win over the mount
 
 
+def test_hosted_proof_pdf_is_not_frame_denied(tmp_path):
+    """Chrome's PDF viewer frames the file; X-Frame-Options: DENY rendered a blank page."""
+    client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS))
+    _login(client)
+    html = client.get("/api/session")
+    assert html.headers["x-frame-options"] == "DENY"
+    pdf = client.get("/api/incidents/1/proof/1/pdf")
+    assert pdf.status_code == 200 and pdf.headers["content-type"].startswith("application/pdf")
+    assert pdf.content.startswith(b"%PDF-") and b"MOCK / SYNTHETIC" in pdf.content
+    assert "x-frame-options" not in {k.lower() for k in pdf.headers}
+    # Pages still cannot be framed.
+    form = client.get("/login")
+    assert form.headers["x-frame-options"] == "DENY"
+
+
+def test_favicon_is_served_without_a_passcode(tmp_path):
+    ui = tmp_path / "ui"
+    ui.mkdir()
+    (ui / "index.html").write_text("<html>settlewell-ui</html>")
+    (ui / "favicon.ico").write_bytes(b"ico-bytes")
+    (ui / "favicon.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+    client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS, SETTLEWELL_STATIC_DIR=str(ui)))
+    ico = client.get("/favicon.ico")
+    svg = client.get("/favicon.svg")
+    assert ico.status_code == 200 and ico.content == b"ico-bytes"
+    assert svg.status_code == 200 and "svg" in svg.text
+    # Path tricks must not inherit the favicon exemption.
+    trapped = client.get("/favicon.ico/../api/incidents", follow_redirects=False)
+    assert trapped.status_code in (401, 303, 404)
+
+
 def test_mock_reset_reseeds_through_guard(tmp_path):
     client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS))
     _login(client)

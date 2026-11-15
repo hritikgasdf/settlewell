@@ -60,6 +60,12 @@ def test_get_is_read_only_and_shows_why(env):
     # The seeded demo DB now carries a matched claim and one stored MOCK/SYNTHETIC PDF on the live transfer.
     assert detail["incident"]["evidence"]["claim_matched"] is True
     assert detail["incident"]["claim"]["matched"] is True
+    decision = detail["decisions"][0]
+    assert decision["policy_verdict"] == "seeded_demo"
+    assert decision["rule_id"] == "DUPLICATE_SCHEDULED_SEED"
+    assert "R-MATCHED" in (decision["llm_rationale"] or "")
+    assert "R-STOP-DUPLICATE-SCHEDULED" in decision["llm_rationale"]
+    assert "not a policy run" in decision["llm_rationale"]
     link = "/api/incidents/1/proof/1/pdf"
     assert detail["proof"]["pdf_link"] == link
     doc = detail["proof"]["documents"][0]

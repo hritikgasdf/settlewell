@@ -210,7 +210,12 @@ export default function App() {
       </header>
 
       <div className="banner" role="note" aria-label="Environment" data-mode={apiMode ?? 'unknown'}>
-        <strong>{banner ?? 'API not connected. This console runs only against the local API.'}</strong>
+        <strong>
+          {banner
+            ?? (apiDown
+              ? 'API not connected. This console runs only against the local API.'
+              : 'Connecting…')}
+        </strong>
         <span className="banner-note">{modeNote(apiMode)}</span>
       </div>
 
