@@ -163,7 +163,20 @@ def test_wrong_passcode_and_rate_limit(tmp_path):
 def test_login_refuses_foreign_origin(tmp_path):
     client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS))
     r = client.post("/login", data={"passcode": PASS}, headers={"Origin": "https://evil.example"})
-    assert r.status_code == 403
+    assert r.status_code == 403 and r.json()["error"]["code"] == "origin_forbidden"
+    # same-origin Referrer-Policy must not loosen the check: a null Origin is still refused.
+    null = client.post("/login", data={"passcode": PASS}, headers={"Origin": "null"})
+    assert null.status_code == 403 and null.json()["error"]["code"] == "origin_forbidden"
+
+
+def test_login_page_sends_same_origin_referrer_policy(tmp_path):
+    client = _client(tmp_path, _hosting(SETTLEWELL_DEMO_PASSCODE=PASS))
+    form = client.get("/login")
+    assert form.status_code == 200
+    assert form.headers["referrer-policy"] == "same-origin"
+    # A same-origin Origin still reaches the passcode check (401, not 403).
+    wrong = client.post("/login", data={"passcode": "nope"}, headers={"Origin": PUBLIC})
+    assert wrong.status_code == 401
 
 
 def test_forged_or_expired_cookie_refused(tmp_path):
@@ -228,6 +241,7 @@ def test_static_ui_served_behind_gate(tmp_path):
     page = client.get("/")
     assert page.status_code == 200 and "settlewell-ui" in page.text
     assert page.headers["x-frame-options"] == "DENY"
+    assert page.headers["referrer-policy"] == "same-origin"
     assert client.get("/api/health").json()["mode"] == "MOCK"  # API routes win over the mount
 
 

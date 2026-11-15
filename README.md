@@ -65,12 +65,15 @@ Fresh real requests to the Airwallex **sandbox** completed the hero money path. 
 
 ## Hosted demo
 
-**URL:** `https://<your-service>.up.railway.app` (placeholder until deployed). Ask the team for the demo passcode.
+Two services on Render's free plan. The first request after idle can take about a minute (cold start). The shared demo passcode is given to judges privately, not in this README.
 
-One container serves the API and the built React console on the same origin (`Dockerfile`, `railway.json`). Start command: `python -m backend.hosted`, listening on `0.0.0.0:$PORT` (default 8080). Railway health check: `GET /health`.
+- **Mock demo:** [https://settlewell-demo.onrender.com](https://settlewell-demo.onrender.com) — seeds INV-2291; judges click approvals here.
+- **Sandbox demo:** [https://settlewell-sandbox.onrender.com](https://settlewell-sandbox.onrender.com) — live Airwallex sandbox plus Claude; the run starts only from **Reset demo**.
+
+One container serves the API and the built React console on the same origin (`Dockerfile`; `railway.json` remains as a Railway alternative). Start command: `python -m backend.hosted`, listening on `0.0.0.0:$PORT` (default 8080). Health check: `GET /health`.
 
 - **Passcode gate.** With `SETTLEWELL_DEMO_PASSCODE` set, every page and API route except `/health` (and the HMAC-signed `/api/webhooks/airwallex`) needs the passcode. `/login` sets an HttpOnly, Secure, SameSite=Strict signed cookie for 12 hours. Failed attempts are rate limited per client and globally. Sandbox mode refuses to start without a passcode.
-- **Same safety model.** Writes still need an allowed Host, an allowed Origin and the per-process CSRF token, and every money action still goes through `execute()` with a bound, single-use approval. `SETTLEWELL_PUBLIC_ORIGIN` (or Railway's `RAILWAY_PUBLIC_DOMAIN`, picked up automatically) adds the public host and origin; `SETTLEWELL_ALLOWED_HOSTS` adds extra exact hosts. With none of these set, the API is loopback-only as before.
+- **Same safety model.** Writes still need an allowed Host, an allowed Origin and the per-process CSRF token, and every money action still goes through `execute()` with a bound, single-use approval. `SETTLEWELL_PUBLIC_ORIGIN` (or Railway's `RAILWAY_PUBLIC_DOMAIN`, picked up automatically if you deploy there) adds the public host and origin; `SETTLEWELL_ALLOWED_HOSTS` adds extra exact hosts. With none of these set, the API is loopback-only as before.
 - **Mock mode** (`SETTLEWELL_MODE=mock`, default): seeds Lumen Textiles / INV-2291 with a pending duplicate-stop proposal on every boot. **Reset demo** in the console header (or `POST /api/demo/reset`, CSRF-guarded) wipes and reseeds the synthetic ledger so judges can rerun it.
 - **Sandbox mode** (`SETTLEWELL_MODE=sandbox`): needs `AIRWALLEX_SANDBOX_CLIENT_ID`, `AIRWALLEX_SANDBOX_API_KEY` and `ANTHROPIC_API_KEY`. With `SETTLEWELL_SANDBOX_AUTORUN=1`, the live sandbox hero runs once on first boot, and **Reset demo** releases or cancels only this run's own transfers (cancels go through `execute()`) and then reruns the hero in the background (at most once every 2 minutes; progress at `GET /api/demo/status`). Without it, the console shows the run recorded in the data directory, read from the hero manifest.
 - **Data.** SQLite at `SETTLEWELL_DB` (default `/data/settlewell.db` when a `/data` volume is mounted, else `/tmp/settlewell/settlewell.db`). Sandbox runs keep `hero-run-manifest.json` and `hero-sandbox.db` beside it.
