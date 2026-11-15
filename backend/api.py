@@ -258,11 +258,19 @@ def _seed_demo(conn) -> None:
         expires_at=(datetime.now(UTC) + timedelta(days=30)).isoformat(),
         created_at=now,
     )
+    # Honest seed label: this is not a policy run. Still record the rules that justify the
+    # seeded STOP_DUPLICATE proposal (R-MATCHED from the offline parser; scheduled duplicate).
+    seeded_rationale = (
+        "Seeded demo row, not a policy run. The offline parser matched the synthetic email "
+        "under R-MATCHED (INV-2291, amount and currency agreed). The colleague duplicate is "
+        "SCHEDULED, so the proposal is STOP_DUPLICATE (R-STOP-DUPLICATE-SCHEDULED). "
+        "Prerequisites are listed on the proposal; they were not produced by a live policy execution."
+    )
     conn.execute(
         """INSERT INTO decision (incident_id, rule_id, inputs_hash, proposed_action,
            policy_verdict, llm_rationale) VALUES (?, 'DUPLICATE_SCHEDULED_SEED', ?, 'STOP_DUPLICATE',
-           'seeded_demo', NULL)""",
-        (incident_id, binding_hash(intent_terms(conn, ref.id))),
+           'seeded_demo', ?)""",
+        (incident_id, binding_hash(intent_terms(conn, ref.id)), seeded_rationale),
     )
     append_audit(conn, incident_id=incident_id, kind="demo_seeded",
                  detail=f"intent={ref.id} synthetic data", created_at=now)
@@ -481,7 +489,10 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         response = await call_next(request)
         if hosted:
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
-            response.headers.setdefault("X-Frame-Options", "DENY")
+            # Chrome's PDF viewer frames the document; DENY makes it a blank white page.
+            content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if content_type != "application/pdf":
+                response.headers.setdefault("X-Frame-Options", "DENY")
             response.headers.setdefault("Referrer-Policy", "same-origin")
         return response
 

@@ -26,8 +26,9 @@ HEALTH_PATH = "/health"
 LOGIN_PATH = "/login"
 LOGOUT_PATH = "/logout"
 WEBHOOK_PATH = "/api/webhooks/airwallex"  # HMAC-signed by Airwallex; cannot log in
+FAVICON_PATHS = frozenset({"/favicon.ico", "/favicon.svg"})
 # Exempt from the passcode gate. Each one is read-only or has its own authentication.
-GATE_EXEMPT = frozenset({HEALTH_PATH, LOGIN_PATH, WEBHOOK_PATH})
+GATE_EXEMPT = frozenset({HEALTH_PATH, LOGIN_PATH, WEBHOOK_PATH}) | FAVICON_PATHS
 FAIL_WINDOW_S = 300
 FAILS_PER_CLIENT = 5
 FAILS_GLOBAL = 30
