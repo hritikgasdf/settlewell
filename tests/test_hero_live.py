@@ -1,5 +1,6 @@
 """P2-8 live hero state machine against the stateful fake remote. No network, no credentials."""
 
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -195,3 +196,40 @@ def test_original_and_duplicate_fixtures_share_eur_source_currency(tmp_path):
     sent = [p for p in remote.posts if p.get("request_id") in (orig.request_id, dup.request_id)]
     assert len(sent) == 2
     assert {(p["transfer_currency"], p["source_currency"]) for p in sent} == {("EUR", "EUR")}
+
+
+def _stored_claim(tmp_path):
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "run.db")
+    try:
+        return json.loads(conn.execute("SELECT claim_json FROM incident WHERE id = 1").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def test_claim_records_safe_parse_provenance_for_an_injected_parser(tmp_path):
+    _hero(tmp_path, Remote()).run()
+    claim = _stored_claim(tmp_path)
+    assert claim["matched"] is True and claim["invoice_ref"].startswith("INV-")
+    assert claim["parse"]["source"] == "injected_test_parser" and claim["parse"]["model"] is None
+
+
+def test_claim_records_claude_model_name_without_the_raw_reply(tmp_path, monkeypatch):
+    from backend import claims
+
+    reply = {}
+
+    def fake_meta(email):
+        reply["text"] = claims.mock_complete(email)
+        return reply["text"], {"model": "claude-haiku-4-5", "input_tokens": 9, "output_tokens": 9}
+
+    monkeypatch.setattr(claims, "complete_with_meta", fake_meta)
+    remote = Remote()
+    hero = Hero(remote, SandboxDriver(remote, confirm_sandbox=True), str(tmp_path / "m.json"),
+                str(tmp_path / "run.db"), complete=claims.anthropic_complete, sleep=lambda _s: None, polls=2)
+    hero.run()
+    claim = _stored_claim(tmp_path)
+    assert claim["parse"]["source"] == "claude" and claim["parse"]["model"] == "claude-haiku-4-5"
+    assert reply["text"] not in json.dumps(claim)
