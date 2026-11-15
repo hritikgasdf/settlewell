@@ -241,10 +241,17 @@ class SandboxDriver:
         return found
 
     def _reach(self, transfer_id: str, status: str) -> Transfer:
+        """Simulate a move to `status`, retrying while the transfer settles.
+
+        A just-created transfer is briefly SCHEDULED/CREATED, where the simulation answers 500; it
+        then auto-moves to PROCESSING and stays there. So re-ask on each poll instead of only once."""
         current = self.transition(transfer_id, status)
-        if current.status == status:
-            return current
-        return self._until(transfer_id, lambda transfer: transfer.status == status)
+        for _ in range(self._attempts):
+            if current.status == status:
+                return current
+            self._sleep(0.5)
+            current = self.transition(transfer_id, status)
+        return current
 
     def _until(self, transfer_id: str, predicate) -> Transfer:
         last = self._client.get_transfer(transfer_id)
