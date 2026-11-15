@@ -191,3 +191,45 @@ def test_create_error_not_accepted_fails_closed_with_stage_and_request_id():
     assert sandbox.LAST_TRACE["stage"] == "create_transfer"
     assert sandbox.LAST_TRACE["request_id"] == "stl-contract-1"
     assert sandbox.LAST_TRACE["accepted"] == "no"
+
+
+class SettlingApi:
+    """A new transfer answers 500 to a SENT simulation until it auto-moves to PROCESSING."""
+
+    def __init__(self, scheduled_polls: int) -> None:
+        self.status, self.left, self.posts = "SCHEDULED", scheduled_polls, 0
+
+    def post_json(self, _path, body):
+        self.posts += 1
+        if self.status == "SCHEDULED":
+            self.left -= 1
+            if self.left <= 0:
+                self.status = "PROCESSING"
+            raise AirwallexError(500, "operation_failed", "simulation")
+        if self.status == "CANCELLED":
+            raise AirwallexError(500, "operation_failed", "simulation")
+        self.status = body["next_status"]
+        return {"id": "tr_new", "status": self.status}
+
+    def get_transfer(self, _transfer_id):
+        return parse_transfer({"id": "tr_new", "status": self.status})
+
+
+def test_reach_retries_transition_after_transfer_leaves_scheduled():
+    api = SettlingApi(scheduled_polls=2)
+    result = SandboxDriver(api, confirm_sandbox=True)._reach("tr_new", "SENT")
+    assert result.status == "SENT"
+    assert api.posts == 3  # two refused while SCHEDULED, then the PROCESSING -> SENT move
+
+
+def test_reach_gives_up_after_attempts():
+    api = SettlingApi(scheduled_polls=100)
+    result = SandboxDriver(api, attempts=3, confirm_sandbox=True)._reach("tr_new", "SENT")
+    assert result.status == "SCHEDULED" and api.posts == 4
+
+
+def test_reach_stops_on_terminal_status():
+    api = SettlingApi(scheduled_polls=100)
+    api.status = "CANCELLED"
+    result = SandboxDriver(api, confirm_sandbox=True)._reach("tr_new", "SENT")
+    assert result.status == "CANCELLED" and api.posts == 1

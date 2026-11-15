@@ -89,6 +89,7 @@ class SandboxDemo:
 
     def _work(self, reset: bool) -> None:
         state, beats, problems = "failed", {}, []
+        print("sandbox demo: run started, reset", reset, flush=True)
         try:
             if reset and Path(self.manifest_path).exists():
                 ok, problems = self._resetter()
@@ -99,6 +100,8 @@ class SandboxDemo:
                 else "failed"
         except Exception as error:  # noqa: BLE001 - sanitized: type name only, never a response
             problems = [*problems, type(error).__name__]
+        # beats and problems are sanitized (status words, ids, error type names), never a response
+        print("sandbox demo: run", state, "beats", beats, "problems", problems, flush=True)
         with self._lock:
             self._status.update(state=state, beats=dict(beats), problems=list(problems),
                                 finished_at=datetime.now(UTC).isoformat())
