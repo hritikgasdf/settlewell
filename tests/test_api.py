@@ -216,3 +216,10 @@ def test_remote_failure_fails_closed_without_cancelling(tmp_path):
     intent = client.get("/api/incidents/1").json()["proposals"][0]
     r = client.post(f"/api/incidents/1/proposals/{intent['id']}/approve", json={"binding_hash": intent["binding_hash"]}, headers=headers)
     assert r.status_code == 409 and _remote(path) == "SCHEDULED"
+
+
+def test_marker_claim_rows_do_not_break_incident_detail():
+    from backend.api import _claim_of
+
+    assert _claim_of("duplicate:awx-1") is None and _claim_of(None) is None and _claim_of("[1]") is None
+    assert _claim_of('{"invoice_ref": "INV-1"}') == {"invoice_ref": "INV-1"}

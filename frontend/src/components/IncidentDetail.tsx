@@ -83,9 +83,34 @@ const REFUSAL_TEXT: Record<string, string> = {
   remote_unknown: 'the remote status could not be read',
 };
 
-function refusalText(code: string | null): string {
+function refusalText(code: string | null, status?: string): string {
   if (code === null) return 'eligible';
+  if (code === 'status_not_eligible' && status) {
+    const returned = status === 'CANCELLED' || status === 'FAILED';
+    return `withheld: the payment it covers is now ${status}, and that status does not allow a proof${
+      returned ? ' (a returned or cancelled payment is never shown as paid)' : ''
+    }`;
+  }
   return `withheld: ${REFUSAL_TEXT[code] ?? code}`;
+}
+
+type ParseInfo = { source?: unknown; model?: unknown; rule_id?: unknown; summary?: unknown };
+
+function ParseSource({ parse }: { parse: ParseInfo | undefined }) {
+  if (!parse || typeof parse !== 'object') {
+    return <p className="small muted">Parse source: not recorded for this claim.</p>;
+  }
+  const label =
+    parse.source === 'claude'
+      ? `Claude${typeof parse.model === 'string' && parse.model ? ` (${parse.model})` : ''}`
+      : 'Non-model parser (no Claude call)';
+  return (
+    <p className="small">
+      <strong>Parsed by {label}</strong>
+      {typeof parse.rule_id === 'string' ? ` · rule ${parse.rule_id}` : ''}
+      {typeof parse.summary === 'string' ? <span className="muted"> · {parse.summary}</span> : null}
+    </p>
+  );
 }
 
 export function IncidentDetailPanel(props: Props) {
@@ -117,6 +142,13 @@ export function IncidentDetailPanel(props: Props) {
   const hasFunding = d.funding.payouts.length > 0 || d.funding.balances.length > 0;
   const pdfLink = d.proof.pdf_link;
   const linkedDoc = pdfLink !== null ? d.proof.documents.find((doc) => doc.pdf_url === pdfLink) ?? null : null;
+  const live = d.mode === 'SANDBOX';
+  const claimFields = d.incident.claim
+    ? Object.fromEntries(Object.entries(d.incident.claim).filter(([k]) => k !== 'parse' && k !== 'matched'))
+    : null;
+  const parseInfo = d.incident.claim ? (d.incident.claim.parse as ParseInfo | undefined) : undefined;
+  const statusOf = (recordId: number) => d.transfers.find((t) => t.id === recordId)?.status;
+  const mockProof = d.proof.documents.some((doc) => doc.origin === 'mock_synthetic') || (!live && d.proof.documents.length === 0);
 
   return (
     <div className="detail">
@@ -139,9 +171,16 @@ export function IncidentDetailPanel(props: Props) {
             <Pill>Obligation {d.obligation.status}</Pill>
           </div>
         </div>
-        <p className="demo-note small">
-          Seeded demo data. The demo scenario is a STOP_DUPLICATE cancel of a scheduled duplicate, not a replacement.
-        </p>
+        {live ? (
+          <p className="demo-note small">
+            Live Airwallex sandbox run (virtual funds): the payments, cancel, bank return and replacement below were made
+            against the Airwallex sandbox.
+          </p>
+        ) : (
+          <p className="demo-note small">
+            Seeded demo data. The demo scenario is a STOP_DUPLICATE cancel of a scheduled duplicate, not a replacement.
+          </p>
+        )}
       </section>
 
       <Card id="claim-title" title="Claim">
@@ -152,7 +191,8 @@ export function IncidentDetailPanel(props: Props) {
                 <Pill tone="accent">Matched pinned claim</Pill>
               </p>
             ) : null}
-            <ClaimView claim={d.incident.claim} />
+            <ParseSource parse={parseInfo} />
+            <ClaimView claim={claimFields ?? {}} />
           </>
         ) : (
           <Empty>
@@ -274,14 +314,16 @@ export function IncidentDetailPanel(props: Props) {
           <ul className="plain-list small">
             {d.proof.documents.map((doc) => (
               <li key={doc.id}>
-                Document {doc.id} ({doc.format}, status at issue {doc.status_at_issue}): {refusalText(doc.refusal)}
+                Document {doc.id} ({doc.format}, status at issue {doc.status_at_issue}): {refusalText(doc.refusal, statusOf(doc.transfer_record_id))}
               </li>
             ))}
           </ul>
         ) : null}
         <p className="small muted">
-          Stored proof is a MOCK / SYNTHETIC demo document. It is not Airwallex proof and not bank or network confirmation. If the status
-          changed after this page loaded, the link can return an error; reload the incident.
+          {mockProof
+            ? 'Stored proof is a MOCK / SYNTHETIC demo document. It is not Airwallex proof and not bank or network confirmation.'
+            : 'Stored proof is an Airwallex sandbox confirmation letter (virtual funds), not production bank confirmation.'}{' '}
+          If the status changed after this page loaded, the link can return an error; reload the incident.
         </p>
       </Card>
 
@@ -382,7 +424,15 @@ export function IncidentDetailPanel(props: Props) {
                   ))}
                 </ul>
               ) : (
-                <Empty>No decisions recorded.</Empty>
+                <Empty>
+                  {d.proposals.length > 0
+                    ? `No policy-engine decisions were recorded for this incident${
+                        live ? ': this live sandbox run opened its proposals directly from the scripted hero run' : ''
+                      }. See Proposals above (${d.proposals.length}, each with its own approval) and the Audit tab (${
+                        d.audit.length
+                      } entries).`
+                    : 'No decisions recorded.'}
+                </Empty>
               )
             ) : null}
 

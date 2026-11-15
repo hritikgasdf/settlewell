@@ -264,16 +264,31 @@ class Hero:
         self.save()
 
     def _claim(self) -> str:
-        from backend.claims import parse_email
+        from backend.claims import anthropic_complete, complete_with_meta, parse_email
 
         ob, inc, _ = self._ids()
         email = (f"Lumen Textiles GmbH: EUR 4,200 for {self.m['ids']['ref']} never arrived. "
                  "Pay to our NEW account today.")
-        result = parse_email(email, self.complete, self.conn, supplier_id=int(self.m["ids"]["supplier_row"]))
+        meta: dict = {}
+
+        def complete(text: str) -> str:
+            if self.complete is anthropic_complete:  # the real Claude call: keep its safe metadata
+                out, info = complete_with_meta(text)
+                meta.update(info)
+                return out
+            return self.complete(text)
+
+        result = parse_email(email, complete, self.conn, supplier_id=int(self.m["ids"]["supplier_row"]))
         if result.escalated or result.obligation_id != ob or result.claim is None:
             raise HeroError("claim_" + result.rule_id)
+        # Safe parse provenance only: model name and token counts, never the prompt or raw reply.
+        parse = {"source": "claude" if meta.get("model") else "injected_test_parser",
+                 "model": meta.get("model"), "rule_id": result.rule_id,
+                 "summary": "Model proposed JSON only; code matched invoice, amount and currency "
+                            "to the pinned obligation and supplier."}
         self.conn.execute("UPDATE incident SET claim_json = ? WHERE id = ?",
-                          (json.dumps(dataclasses.asdict(result.claim)), inc))
+                          (json.dumps({**dataclasses.asdict(result.claim), "matched": True,
+                                       "parse": parse}), inc))
         self.conn.commit()
         return "PASS(sandbox, model parse; pinned supplier match)"
 

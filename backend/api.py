@@ -345,6 +345,17 @@ def _transfer_view(row, live_id) -> dict:
     return out
 
 
+def _claim_of(raw) -> dict | None:
+    """A parsed claim object, or None. Marker rows (e.g. 'duplicate:<id>') are not claims."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
     inc = conn.execute("SELECT * FROM incident WHERE id = ?", (incident_id,)).fetchone()
     if inc is None:
@@ -365,7 +376,7 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
     intents = conn.execute(
         "SELECT * FROM execution_intent WHERE incident_id = ? ORDER BY id", (incident_id,)
     ).fetchall()
-    claim = json.loads(inc["claim_json"]) if inc["claim_json"] else None
+    claim = _claim_of(inc["claim_json"])
     return {
         "mode": mode_label(),
         "banner": _banner(),
