@@ -36,6 +36,37 @@ Claude (Haiku, `claude-haiku-4-5` by default) has four touchpoints. None of them
 
 The three advisory outputs are plain strings served by a read-only GET (`/api/incidents/{id}/advisory`). No money module imports `backend/advisory.py` (a test enforces this), the endpoint leaves the ledger byte-for-byte unchanged, and every money step still goes through `execute()` with a bound, single-use human approval. In MOCK mode, without `ANTHROPIC_API_KEY`, or on any error or timeout, the console shows a deterministic template, and each section is labelled with its source (Claude or template). Results are cached per incident so page loads do not re-call the model.
 
+### Risk-tiered autonomy: the agent acts on its own when risk is low and asks a human only when money is at risk
+
+A fixed, code-defined policy table (`backend/autonomy.py`, a read-only mapping) labels every action type
+"auto" or "human". Nothing at runtime can change it: not the agent, not the worker, not Claude.
+Claude's advisory text is never read by this module.
+
+| Action | Who | Rule |
+|---|---|---|
+| Cancel a proven duplicate that is still SCHEDULED (cancel-only, never moves money) | Agent | A-CANCEL-SCHEDULED-DUPLICATE |
+| Parse the supplier email (code validates against the pinned record) | Agent | A-PARSE-CLAIM |
+| Re-read transfer status, retry status checks | Agent | A-READ-STATUS |
+| Fetch the bank return code (e.g. 90701) | Agent | A-READ-RETURN-CODE |
+| Attach status-gated proof | Agent | A-ATTACH-PROOF |
+| WAIT rule: schedule a recheck instead of asking | Agent | A-WAIT-RECHECK |
+| Draft and queue the supplier update into the approval-gated outbox (never delivered) | Agent | A-QUEUE-SUPPLIER-UPDATE |
+| New bank details / new beneficiary (fraud vector: call-back + approval) | Human | H-NEW-BANK-DETAILS |
+| Replacement payout | Human | H-REPLACEMENT-PAYOUT |
+| Any FX conversion | Human | H-FX-CONVERSION |
+| Any amount above `SETTLEWELL_AUTO_MAX_AMOUNT` (code default EUR 1,000; non-EUR amounts always go to a human) | Human | H-OVER-THRESHOLD |
+| Anything the rules do not recognise (unknown kind, ESCALATE, duplicate not SCHEDULED) | Human | H-UNRECOGNISED |
+
+Auto steps still go through `execute()`: the same single-use, terms-bound approval is consumed with approver
+`policy:<rule id>`, the audit log says `auto-approved by policy (rule X)`, and `execute()` re-checks the table
+before any remote call, so a forged `policy:` approval on a payout, FX or beneficiary intent is refused.
+`SETTLEWELL_AUTONOMY=0` (the code default) restores human approval for every step. The hosted demos set
+autonomy on and the auto limit to EUR 5,000 (so the EUR 4,200 scheduled duplicate qualifies) unless the host
+env says otherwise. The incident page shows an "Agent handled it" timeline and a counter, "N of M steps
+handled automatically, K needed a human (reasons)". In the hosted sandbox autorun, the human-gated steps
+(bank change, FX, replacement) are approved by a scripted `finance-approver`, and the console labels them
+"hosted autorun simulates this human approval".
+
 ### Who it is for
 
 The two demo identities are `ap-clerk` and `finance-approver`. The clerk proposes. The finance approver approves. The same person cannot approve their own proposal. The supplier in the seeded hero is Lumen Textiles GmbH, invoice INV-2291, 4200.00 EUR. That supplier and those emails are synthetic.

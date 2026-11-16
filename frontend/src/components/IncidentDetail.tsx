@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { BankRecord, IncidentDetail as Detail, Proposal, Transfer } from '../types';
 import { AdvisoryPanel } from './AdvisoryPanel';
+import { AgentPanel } from './AgentPanel';
 import { Card, Empty, Field, Pill, show } from './Panels';
 import { ProposalCard } from './ProposalCard';
 import { TransferCard } from './TransferCard';
@@ -15,6 +16,7 @@ interface Props {
   onApprove: (p: Proposal) => void;
   onReject: (p: Proposal, reason: string) => void;
   onCancel: (t: Transfer) => void;
+  onRunAgent: () => void;
   onRetry: () => void;
 }
 
@@ -331,6 +333,7 @@ export function IncidentDetailPanel(props: Props) {
         </p>
       </Card>
 
+      <AgentPanel autonomy={d.autonomy} writesEnabled={writesEnabled} busy={busy} onRunAgent={props.onRunAgent} />
       <AdvisoryPanel incidentId={d.incident.id} />
 
       <Card id="proposals-title" title="Proposals">

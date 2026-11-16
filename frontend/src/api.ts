@@ -2,6 +2,7 @@
 // The CSRF token is kept in memory for this page only; it is never persisted.
 import type {
   Advisory,
+  AgentRunResponse,
   IncidentDetail,
   IncidentList,
   ProposalActionResponse,
@@ -172,6 +173,11 @@ export function cancelTransfer(incidentId: number, transferId: number): Promise<
   return post<ProposalActionResponse>(`/api/incidents/${incidentId}/transfers/${transferId}/cancel`, {
     expected_status: 'SCHEDULED',
   });
+}
+
+/** Let the agent handle low-risk steps. The server auto-approves only policy-table AUTO proposals. */
+export function runAgent(incidentId: number): Promise<AgentRunResponse> {
+  return post<AgentRunResponse>(`/api/incidents/${incidentId}/agent/run`, {});
 }
 
 export interface DemoResetResponse {

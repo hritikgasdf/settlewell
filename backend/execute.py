@@ -263,6 +263,47 @@ def approve_intent(conn, intent_id: int, *, approver: str, as_of: str) -> None:
         raise ExecuteError(error.code) from error
 
 
+def auto_approve_intent(conn, intent_id: int, *, as_of: str) -> str | None:
+    """Consume the approval as ``policy:<rule id>`` when the static policy table says AUTO.
+
+    Returns the rule id, or None when the step needs a human (nothing is changed then).
+    Money-moving and beneficiary kinds can never reach the approve call."""
+    from backend import autonomy
+    from backend.approvals import ApprovalError, approve
+    from backend.ledger import append_audit
+
+    intent = _intent(conn, intent_id)
+    if intent["kind"] in autonomy.NEVER_AUTO:
+        return None
+    if intent["state"] != "proposed" or intent["approval_id"] is None:
+        return None
+    verdict = autonomy.classify_intent(conn, intent)
+    if not verdict.auto:
+        return None
+    if _moment(as_of) >= _expiry(intent["expires_at"]):
+        return None
+    stamp = _moment(as_of)
+    try:
+        approve(
+            conn,
+            int(intent["approval_id"]),
+            _terms(conn, intent_id),
+            approver=autonomy.policy_approver(verdict.rule_id),
+            used_at=stamp,
+        )
+    except ApprovalError as error:
+        raise ExecuteError(error.code) from error
+    append_audit(
+        conn,
+        incident_id=intent["incident_id"],
+        kind="auto_approved",
+        detail=f"intent={intent_id} auto-approved by policy (rule {verdict.rule_id})",
+        created_at=stamp,
+    )
+    conn.commit()
+    return verdict.rule_id
+
+
 def reject_intent(conn, intent_id: int, *, rejector: str, reason: str, as_of: str) -> None:
     """Refuse a proposed intent for good. The approval can never be consumed afterwards."""
     intent = _intent(conn, intent_id)
@@ -661,6 +702,7 @@ def _ready(conn, intent, as_of: str | None) -> None:
         raise ExecuteError("unapproved")
     if approval["approver"] == approval["proposer"]:
         raise ExecuteError("self")
+    _policy_guard(conn, intent, approval)
     expires = intent["expires_at"] or approval["expires_at"]
     if not expires:
         raise ExecuteError("expiry")
@@ -710,3 +752,16 @@ def _replacement_policy(conn, client, intent) -> None:
         raise ExecuteError("policy")
     if intent["failure_code"] and intent["failure_code"] != code:
         raise ExecuteError("policy")
+
+
+def _policy_guard(conn, intent, approval) -> None:
+    """A policy approval is honoured only while the static table still says AUTO for this row."""
+    from backend import autonomy
+
+    if not autonomy.is_policy_approver(approval["approver"]):
+        return
+    if intent["kind"] in autonomy.NEVER_AUTO:
+        raise ExecuteError("policy_auto_forbidden")
+    verdict = autonomy.classify_intent(conn, intent)
+    if not verdict.auto or autonomy.policy_approver(verdict.rule_id) != approval["approver"]:
+        raise ExecuteError("policy_auto_forbidden")
