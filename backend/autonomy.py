@@ -129,6 +129,11 @@ def _cancel_verdict(conn, intent, rule: PolicyRule, env) -> Verdict:
         ).fetchone()
     if record is None:
         return _human("Duplicate transfer not on record", UNKNOWN_RULE.rule_id)
+    live = conn.execute(
+        "SELECT live_transfer_id FROM obligation WHERE id = ?", (intent["obligation_id"],)
+    ).fetchone()
+    if live is None or str(live["live_transfer_id"]) == str(intent["target_id"]):
+        return _human("Target is the obligation's live payment, not a proven duplicate", UNKNOWN_RULE.rule_id)
     status = str(record["status"] or "").upper()
     if decide(status, claim="duplicate", duplicate_status=status).action is not Action.STOP_DUPLICATE:
         return _human(f"Duplicate is {status or 'unknown'}, not SCHEDULED: the rules do not allow a stop",

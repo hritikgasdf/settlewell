@@ -285,3 +285,17 @@ def test_hero_with_autonomy_off_uses_human_approver(tmp_path):
         "SELECT a.approver FROM execution_intent e JOIN approval a ON a.id = e.approval_id "
         "WHERE e.kind = 'cancel'").fetchone()[0]
     assert approver == "finance-approver"
+
+
+def test_cancel_targeting_the_live_payment_is_human(tmp_path, monkeypatch):
+    _on(monkeypatch)
+    _client, _h, path = _boot(tmp_path)
+    conn = connect(str(path))
+    try:
+        row = conn.execute("SELECT * FROM execution_intent WHERE kind = 'cancel'").fetchone()
+        live = conn.execute("SELECT live_transfer_id FROM obligation WHERE id = ?", (row["obligation_id"],)).fetchone()[0]
+        conn.execute("UPDATE transfer_record SET status = 'SCHEDULED' WHERE id = ?", (live,))
+        fake = dict(row) | {"target_id": str(live)}
+        assert autonomy.classify_intent(conn, fake).tier == autonomy.HUMAN
+    finally:
+        conn.close()
