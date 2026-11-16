@@ -50,7 +50,11 @@ _TIMELINE_RE = re.compile(
     r"|\b(?:within|by|before|until|no later than)\s+(?:the\s+)?(?:end\s+of\s+)?"
     r"(?:today|tomorrow|tonight|next|this|monday|tuesday|wednesday|thursday|friday|"
     r"saturday|sunday|\d)"
-    r"|\b(?:today|tomorrow|overnight|shortly after|eod|end of (?:day|week))\b"
+    r"|\b(?:today|tomorrow|overnight|shortly after|eod|end of (?:the )?(?:day|week|month))\b"
+    r"|\b\d+\s*(?:hrs?|wks?)\b|\b(?:next|this) (?:week|month)\b"
+    r"|\b(?:a|one|two|three|four|five|six|seven|ten|few|couple of)\s+(?:business\s+)?"
+    r"(?:days?|weeks?)\b"
+    r"|\bon (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
     r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b"
     r"|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
     re.IGNORECASE,
