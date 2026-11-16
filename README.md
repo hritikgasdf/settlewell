@@ -3,9 +3,10 @@
 **An agentic payment-ops incident commander on Airwallex.** Settlewell takes a supplier's "where's my money?" email and runs the incident to closure: it understands the claim, diagnoses the payment, handles the low-risk steps itself, and asks a human only when money is at risk. Submitted to the Airwallex Agentic Banking Hackathon, Starter Kit 03 (Payment Ops Incident Commander), as "Settlewell (formerly Where's My Money?)".
 
 > ## Try it live
+> - **Demo video:** **https://youtu.be/h0BpU4MTPPA**
 > - **Live sandbox** (real Airwallex sandbox + Claude): **https://settlewell-sandbox.onrender.com**
 > - **Mock demo** (resettable, no external calls): **https://settlewell-demo.onrender.com**
-> - **Passcode:** provided to judges privately (not in this repo).
+> - **No passcode needed:** it was removed so judges can try the app freely (it guarded real Claude API and Airwallex sandbox usage).
 > - **First load may take ~1 minute** (Render free tier cold start).
 
 ## What it does and why
@@ -30,7 +31,7 @@ Settlewell handles that incident end to end:
 
 ## Using the hosted demo (step by step)
 
-1. Open a URL above and enter the passcode at `/login` (cookie lasts 12 hours).
+1. Open a URL above. No passcode is needed; the console opens directly (first load may take ~1 minute).
 2. **Reset demo** (console header) gives a clean run. Mock: reseeds Lumen Textiles / INV-2291 instantly. Sandbox: cancels only this run's own transfers and reruns the live hero in the background (~30–40 s; at most once every 2 minutes; progress at `GET /api/demo/status`).
 3. **Open the incident** from the Incidents list (INV-2291 on mock; the current run's invoice on sandbox; ids change on every reset or cold start).
 4. Read the **Agent handled it** card: "N of M steps handled automatically", each step with its policy rule, and why the rest needed a human.
