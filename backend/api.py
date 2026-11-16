@@ -28,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend import api_proof
+from backend import advisory, api_proof
 from backend import hosting as hosting_mod
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import CancelResult, Transfer
@@ -649,6 +649,18 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
         if detail is None:
             raise ApiError(404, "not_found", "incident not found")
         return detail
+
+    @app.get("/api/incidents/{incident_id}/advisory")
+    def incident_advisory(incident_id: int):
+        """Advisory-only AI text. Read-only: builds facts from the detail view, returns strings."""
+        conn = db()
+        try:
+            detail = _incident_detail(conn, incident_id, OPERATOR)
+        finally:
+            conn.close()
+        if detail is None:
+            raise ApiError(404, "not_found", "incident not found")
+        return advisory.advise(advisory.facts_from_detail(detail)).to_dict()
 
     @app.get("/api/incidents/{incident_id}/proof/{document_id}/pdf")
     def proof_pdf(incident_id: int, document_id: int):

@@ -25,6 +25,7 @@ Read this table before any claim in the README, the plan or a recording.
 | Sandbox money | **Virtual.** Airwallex sandbox simulated funds, no real bank movement | Banner: synthetic supplier, sandbox funds |
 | Production use | **Unsupported.** No production credentials, hosting, monitoring or key management exist | Not offered |
 | Claim parser | **Live Claude verified** on this box with `claude-haiku-4-5-20251001`; strict validation and pinned-supplier matching retained. Offline tests use a deterministic completer | Model proposes only; no money tools |
+| Advisory AI (explainer, supplier reply draft, unknown-incident triage) | **Advisory only.** Claude Haiku on the sandbox host when `ANTHROPIC_API_KEY` is set; deterministic template in MOCK, without a key, or on error. Read-only GET; no money module imports it (test-enforced); reply draft is never sent | Each section labelled Claude or template |
 | Beneficiary change | A person enters the call-back attestation text. Software does not verify the call-back or the bank | Attestation recorded, not verified |
 | User authentication | **None locally; a shared demo passcode when hosted** (see [Hosted demo](#hosted-demo)). No per-user login. Writes need a loopback Host, an allowed Origin and a per-process CSRF token. Approver identities are demo labels | MOCK |
 | Replay (`/replay`) | **MOCK.** Canned statuses, letter, `PAYOUT_REVERSAL` and quote rate | MOCK |

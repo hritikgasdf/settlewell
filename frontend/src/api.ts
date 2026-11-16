@@ -1,6 +1,7 @@
 // One fetch client for the local demo API. Mutations are never retried automatically.
 // The CSRF token is kept in memory for this page only; it is never persisted.
 import type {
+  Advisory,
   IncidentDetail,
   IncidentList,
   ProposalActionResponse,
@@ -136,6 +137,11 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export function listIncidents(): Promise<IncidentList> {
   return request<IncidentList>('GET', '/api/incidents');
+}
+
+/** Advisory-only AI text for one incident (read-only GET; cached server-side). */
+export function getAdvisory(id: number): Promise<Advisory> {
+  return request<Advisory>('GET', `/api/incidents/${id}/advisory`);
 }
 
 export function getIncident(id: number): Promise<IncidentDetail> {
