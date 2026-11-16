@@ -221,3 +221,61 @@ def test_failed_model_call_is_not_cached():
     assert advisory.advise(_facts(), complete=flaky).explanation.source == "claude"
     assert advisory.advise(_facts(), complete=flaky).explanation.source == "claude"
     assert len(calls) == 2
+
+
+def _detail(**over):
+    d = {"incident": {"id": 1, "state": "OPEN", "claim": None}, "decisions": [],
+         "transfers": [{"id": 1, "status": "CANCELLED", "origin": "external"}],
+         "proposals": [], "obligation": {}, "supplier": {"name": "S"}}
+    d.update(over)
+    return d
+
+
+def test_triage_skipped_when_rules_handled_incident():
+    assert advisory.facts_from_detail(_detail())["needs_triage"] is True
+    closed = _detail(incident={"id": 1, "state": "CLOSED", "claim": None})
+    executed = _detail(proposals=[{"action": "REPLACE", "state": "executed"}])
+    ours = _detail(transfers=[{"id": 3, "status": "PAID", "origin": "settlewell"}])
+    for detail in (closed, executed, ours):
+        facts = advisory.facts_from_detail(detail)
+        assert facts["rules_handled"] is True and facts["needs_triage"] is False
+        out = advisory.advise(facts, complete=_reply(
+            {"explanation": "x", "reply_draft": "y",
+             "triage": {"playbook": "WAIT", "confidence": 0.9, "reason": "r"}}))
+        assert out.triage.needed is False and out.triage.source == "rules"
+        assert out.triage.reason.startswith("Rules handled this incident")
+        assert "None" not in out.triage.reason
+
+
+@pytest.mark.parametrize("text", [
+    "Please allow 1–3 business days for the funds to appear.",
+    "You should receive it within 24 hours.", "Expect it by Friday.",
+    "It will arrive on Nov 20.", "Value date 2026-11-20.", "It takes 3 days.",
+    "Allow 48 hrs.", "It should land in a few days.", "Expect it next week.",
+    "Funds arrive on Friday.", "By the end of the month."])
+def test_reply_with_timeline_falls_back_to_template(text):
+    out = advisory.advise(_facts(), complete=_reply(
+        {"explanation": "Rules cancel the duplicate.", "reply_draft": text, "triage": None}))
+    assert out.reply_draft.source == "template"
+    assert not advisory.promises_timeline(out.reply_draft.text)
+    assert out.explanation.source == "claude"
+
+
+def test_reply_without_timeline_is_kept_and_prompt_forbids_timelines():
+    ok = "Hello, we found a duplicate for INV-2291 (EUR 4200.00) and you will be paid once."
+    out = advisory.advise(_facts(), complete=_reply(
+        {"explanation": "x", "reply_draft": ok, "triage": None}))
+    assert out.reply_draft.source == "claude" and out.reply_draft.text == ok
+    assert "NEVER state, estimate or promise any timeline" in advisory.SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("action", ["STOP_DUPLICATE", "WAIT", "PROOF", "TRACE", "ESCALATE", None])
+def test_every_template_reply_passes_the_timeline_filter(action):
+    decisions = [{"rule_id": "R-X", "action": action}] if action else []
+    reply = advisory._template(_facts(decisions=decisions)).reply_draft.text
+    assert not advisory.promises_timeline(reply)
+
+
+def test_unhandled_escalation_still_triaged():
+    detail = _detail(decisions=[{"rule_id": "R-UNKNOWN-CODE", "proposed_action": "ESCALATE"}])
+    assert advisory.facts_from_detail(detail)["needs_triage"] is True
