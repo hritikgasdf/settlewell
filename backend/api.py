@@ -28,7 +28,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend import advisory, api_proof
+from backend import advisory, api_proof, autonomy
 from backend import hosting as hosting_mod
 from backend.airwallex.client import AirwallexError
 from backend.airwallex.types import CancelResult, Transfer
@@ -331,9 +331,26 @@ def _intent_view(conn, row, operator: str, now: str) -> dict:
             "used_at": approval["used_at"] if approval else None,
         },
         "prerequisites": prerequisites, "blocked_reasons": blocked,
+        "autonomy": _verdict_view(conn, row, approval),
         "can_approve": not blocked, "can_reject": row["state"] == "proposed"
         and approval_state == "pending",
     }
+
+
+def _sandbox_mode() -> bool:
+    cfg = _ACTIVE[0]
+    return cfg is not None and getattr(cfg, "mode", None) == "SANDBOX"
+
+
+def _verdict_view(conn, row, approval) -> dict:
+    approver = approval["approver"] if approval else None
+    if autonomy.is_policy_approver(approver):
+        rule = str(approver)[len(autonomy.POLICY_PREFIX):]
+        return {"tier": autonomy.AUTO, "rule_id": rule, "auto_approved": True,
+                "reason": f"auto-approved by policy (rule {rule})"}
+    verdict = autonomy.classify_intent(conn, row)
+    return {"tier": verdict.tier, "rule_id": verdict.rule_id, "auto_approved": False,
+            "reason": verdict.reason}
 
 
 def _transfer_view(row, live_id) -> dict:
@@ -396,6 +413,7 @@ def _incident_detail(conn, incident_id: int, operator: str) -> dict | None:
             """SELECT id, rule_id, proposed_action, policy_verdict, llm_rationale, inputs_hash
             FROM decision WHERE incident_id = ? ORDER BY id""", (incident_id,))),
         "proposals": [_intent_view(conn, r, operator, now) for r in intents],
+        "autonomy": autonomy.timeline(conn, int(ob["id"]), sandbox=_sandbox_mode()),
         "funding": {
             "payouts": _rows(conn.execute(
                 """SELECT intent_id, currency, amount, fee_budget, reserve_floor, available_before,
@@ -755,6 +773,50 @@ def create_app(db_path: str | None = None, *, client_factory=None, clock=None,
                 view = _intent_view(conn, _intent_in_incident(conn, incident_id, intent_id),
                                     OPERATOR, now())
                 return {"ok": True, "incident_id": incident_id, "intent": view}
+            finally:
+                conn.close()
+
+    @app.post("/api/incidents/{incident_id}/agent/run")
+    def agent_run(incident_id: int, request: Request):
+        """Let the agent handle the low-risk steps: auto-approve (as policy:<rule>) and execute
+        only proposals the static policy table marks AUTO. Human-gated proposals are untouched."""
+        write_guard(request)
+        if not autonomy.enabled():
+            raise ApiError(409, "autonomy_off", "autonomy is off (SETTLEWELL_AUTONOMY)")
+        from backend.execute import auto_approve_intent
+
+        with _write_lock:
+            conn = db()
+            try:
+                if conn.execute("SELECT 1 FROM incident WHERE id = ?", (incident_id,)).fetchone() is None:
+                    raise ApiError(404, "not_found", "incident not found")
+                handled, left = [], []
+                client = make_client(conn)
+                for row in conn.execute(
+                        "SELECT id FROM execution_intent WHERE incident_id = ? AND state = 'proposed' ORDER BY id",
+                        (incident_id,)).fetchall():
+                    stamp = now()
+                    try:
+                        rule = auto_approve_intent(conn, int(row["id"]), as_of=stamp)
+                    except ExecuteError:
+                        rule = None
+                    if rule is None:
+                        left.append(int(row["id"]))
+                        continue
+                    try:
+                        result = execute(conn, client, int(row["id"]), as_of=stamp)
+                    except (ExecuteError, StopDuplicateError, AirwallexError, ReplaceError,
+                            FundingError) as error:
+                        code = getattr(error, "code", None) or "remote_error"
+                        fail_closed(conn, int(row["id"]), code=str(code), as_of=stamp)
+                        left.append(int(row["id"]))
+                        continue
+                    append_audit(conn, incident_id=incident_id, kind="intent_executed",
+                                 detail=f"intent={row['id']} kind={result.kind} remote={result.remote_id} "
+                                        f"status={result.status} by=policy:{rule}", created_at=stamp)
+                    conn.commit()
+                    handled.append({"intent_id": int(row["id"]), "rule_id": rule, "status": result.status})
+                return {"ok": True, "incident_id": incident_id, "handled": handled, "needs_human": left}
             finally:
                 conn.close()
 

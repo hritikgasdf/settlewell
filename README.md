@@ -12,6 +12,37 @@ The safety design uses documented Airwallex API patterns: amounts taken from the
 
 A new bank detail set becomes a new beneficiary only after validation and a call-back attestation. The previous beneficiary is not modified.
 
+## Risk-tiered autonomy: the agent acts on its own when risk is low and asks a human only when money is at risk
+
+A fixed, code-defined policy table (`backend/autonomy.py`, a read-only mapping) labels every action type
+"auto" or "human". Nothing at runtime can change it: not the agent, not the worker, not Claude.
+Claude's advisory text is never read by this module.
+
+| Action | Who | Rule |
+|---|---|---|
+| Cancel a proven duplicate that is still SCHEDULED (cancel-only, never moves money) | Agent | A-CANCEL-SCHEDULED-DUPLICATE |
+| Parse the supplier email (code validates against the pinned record) | Agent | A-PARSE-CLAIM |
+| Re-read transfer status, retry status checks | Agent | A-READ-STATUS |
+| Fetch the bank return code (e.g. 90701) | Agent | A-READ-RETURN-CODE |
+| Attach status-gated proof | Agent | A-ATTACH-PROOF |
+| WAIT rule: schedule a recheck instead of asking | Agent | A-WAIT-RECHECK |
+| Draft and queue the supplier update into the approval-gated outbox (never delivered) | Agent | A-QUEUE-SUPPLIER-UPDATE |
+| New bank details / new beneficiary (fraud vector: call-back + approval) | Human | H-NEW-BANK-DETAILS |
+| Replacement payout | Human | H-REPLACEMENT-PAYOUT |
+| Any FX conversion | Human | H-FX-CONVERSION |
+| Any amount above `SETTLEWELL_AUTO_MAX_AMOUNT` (code default EUR 1,000; non-EUR amounts always go to a human) | Human | H-OVER-THRESHOLD |
+| Anything the rules do not recognise (unknown kind, ESCALATE, duplicate not SCHEDULED) | Human | H-UNRECOGNISED |
+
+Auto steps still go through `execute()`: the same single-use, terms-bound approval is consumed with approver
+`policy:<rule id>`, the audit log says `auto-approved by policy (rule X)`, and `execute()` re-checks the table
+before any remote call, so a forged `policy:` approval on a payout, FX or beneficiary intent is refused.
+`SETTLEWELL_AUTONOMY=0` (the code default) restores human approval for every step. The hosted demos set
+autonomy on and the auto limit to EUR 5,000 (so the EUR 4,200 scheduled duplicate qualifies) unless the host
+env says otherwise. The incident page shows an "Agent handled it" timeline and a counter, "N of M steps
+handled automatically, K needed a human (reasons)". In the hosted sandbox autorun, the human-gated steps
+(bank change, FX, replacement) are approved by a scripted `finance-approver`, and the console labels them
+"hosted autorun simulates this human approval".
+
 ## What is live vs mock
 
 Read this table before any claim in the README, the plan or a recording.
@@ -291,5 +322,6 @@ Variable names only (values never go in the repo):
 | `SETTLEWELL_DEMO_PASSCODE`, `SETTLEWELL_SESSION_SECRET` | Hosted demo: passcode gate and optional cookie-signing secret |
 | `SETTLEWELL_PUBLIC_ORIGIN`, `SETTLEWELL_ALLOWED_HOSTS` | Hosted demo: public origin and extra exact Host names |
 | `SETTLEWELL_STATIC_DIR`, `SETTLEWELL_RESET_ON_BOOT`, `SETTLEWELL_SANDBOX_AUTORUN` | Hosted demo: built UI path, mock reseed on boot (default on), sandbox hero autorun and rerun (default off) |
+| `SETTLEWELL_AUTONOMY`, `SETTLEWELL_AUTO_MAX_AMOUNT` | Risk-tiered autonomy kill switch (code default off; hosted default on) and auto limit in EUR (code default 1000; hosted default 5000) |
 
 For cloud agents, add the sandbox variables as runtime secrets in the agent dashboard, then start a new agent; a running agent does not see secrets added later. For local Cursor, export the same variables in the environment Cursor starts with, then reload MCP.

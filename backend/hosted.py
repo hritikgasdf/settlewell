@@ -149,6 +149,11 @@ def build(env=None):
         os.environ["SETTLEWELL_MOCK"] = "1"
     else:
         os.environ.pop("SETTLEWELL_MOCK", None)
+    # Hosted demo defaults (an explicit host env value always wins): risk-tiered autonomy on,
+    # auto limit EUR 5,000 so the EUR 4,200 scheduled duplicate is cancel-eligible. The code
+    # default elsewhere is autonomy OFF and EUR 1,000. SETTLEWELL_AUTONOMY=0 restores human-only.
+    for key, default in (("SETTLEWELL_AUTONOMY", "1"), ("SETTLEWELL_AUTO_MAX_AMOUNT", "5000")):
+        os.environ[key] = source.get(key) or default
     db = default_db(source)
     sandbox_demo = None
     if requested == "sandbox":

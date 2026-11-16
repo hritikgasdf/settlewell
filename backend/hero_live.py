@@ -21,7 +21,13 @@ from pathlib import Path
 
 from backend.approvals import AP_CLERK, FINANCE_APPROVER, approve
 from backend.bank_change import verify_bank_change
-from backend.execute import CallbackConfirmation, execute, intent_terms, open_intent
+from backend.execute import (
+    CallbackConfirmation,
+    auto_approve_intent,
+    execute,
+    intent_terms,
+    open_intent,
+)
 from backend.fx_funding import fund_replacement
 from backend.ledger import append_bank_detail_version, connect, migrate
 from backend.paid_once import scan_paid_once
@@ -190,8 +196,11 @@ class Hero:
         self.save()
         return found
 
-    def _intent(self, name: str, **kw) -> int:
-        """Open once (id persisted), then approve once with a different person than the proposer."""
+    def _intent(self, name: str, *, allow_auto: bool = False, **kw) -> int:
+        """Open once (id persisted), then approve once with a different person than the proposer.
+
+        allow_auto: when the static autonomy policy says AUTO, the approval is consumed as
+        policy:<rule id> instead. Human-gated kinds ignore it (auto_approve_intent refuses them)."""
         if name not in self.m["intents"]:
             now = self.now()
             exp = (datetime.fromisoformat(now) + timedelta(hours=2)).isoformat()
@@ -202,6 +211,8 @@ class Hero:
         row = self.conn.execute(
             "SELECT e.approval_id, a.approver FROM execution_intent e JOIN approval a ON a.id = e.approval_id "
             "WHERE e.id = ?", (intent_id,)).fetchone()
+        if not row["approver"] and allow_auto and auto_approve_intent(self.conn, intent_id, as_of=self.now()):
+            return intent_id
         if not row["approver"]:
             approve(self.conn, row["approval_id"], intent_terms(self.conn, intent_id),
                     approver=FINANCE_APPROVER, used_at=self.now())
@@ -305,7 +316,7 @@ class Hero:
         if row is None:
             raise HeroError("duplicate_not_recorded")
         intent = self._intent(
-            "cancel", kind="cancel", incident_id=int(self.m["ids"]["dup_incident"]), obligation_id=ob,
+            "cancel", allow_auto=True, kind="cancel", incident_id=int(self.m["ids"]["dup_incident"]), obligation_id=ob,
             action="STOP_DUPLICATE", amount=str(row["amount"]), currency=str(row["currency"]),
             beneficiary_id=self.client.get_transfer(dup_id).beneficiary_id or "",
             details_hash=row["details_hash"] or "", target_id=str(row["id"]))

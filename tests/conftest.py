@@ -32,3 +32,11 @@ def block_network(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureReques
     monkeypatch.setattr(socket, "socket", BlockedSocket)
     monkeypatch.setattr(socket, "create_connection", blocked)
     yield
+
+
+@pytest.fixture(autouse=True)
+def autonomy_off_by_default(monkeypatch: pytest.MonkeyPatch):
+    """Existing tests assert today's human-approves-everything behaviour. Autonomy tests opt in."""
+    monkeypatch.setenv("SETTLEWELL_AUTONOMY", "0")
+    monkeypatch.setenv("SETTLEWELL_AUTO_MAX_AMOUNT", "1000")
+    yield

@@ -40,7 +40,24 @@ export function ProposalCard({ proposal: p, busy, writesEnabled, onApprove, onRe
 
       <dl className="kv">
         <Field label="Kind">{p.kind}</Field>
-        <Field label="Approval">{p.approval.state}</Field>
+        <Field label="Approval">
+          {p.approval.state}
+          {p.approval.approver ? ` by ${p.approval.approver}` : ''}
+        </Field>
+        {p.autonomy ? (
+          <Field label="Autonomy">
+            <Pill tone={p.autonomy.tier === 'auto' ? 'accent' : 'warn'}>
+              {p.autonomy.auto_approved
+                ? 'Auto-approved by policy'
+                : p.autonomy.tier === 'auto'
+                  ? 'Auto-eligible'
+                  : 'Needs a human'}
+            </Pill>{' '}
+            <span className="small muted">
+              {p.autonomy.rule_id}: {p.autonomy.reason}
+            </span>
+          </Field>
+        ) : null}
         <Field label="Remote">
           {show(p.remote_id, 'none')} {p.remote_status ? `(${p.remote_status})` : ''}
         </Field>

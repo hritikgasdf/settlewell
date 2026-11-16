@@ -128,6 +128,47 @@ export interface Proposal {
   blocked_reasons: string[];
   can_approve: boolean;
   can_reject: boolean;
+  /** Static policy-table verdict. auto_approved means approver was policy:<rule id>. */
+  autonomy?: { tier: 'auto' | 'human'; rule_id: string; auto_approved: boolean; reason: string };
+}
+
+export interface AgentStep {
+  kind: string;
+  title: string;
+  tier: 'auto' | 'human';
+  state: string; // done | scheduled | auto_eligible | waiting | approved | refused
+  rule_id: string;
+  at: string | null;
+  detail: string;
+  actor: string;
+}
+
+export interface PolicyRow {
+  action: string;
+  tier: 'auto' | 'human';
+  rule_id: string;
+  summary: string;
+}
+
+export interface Autonomy {
+  enabled: boolean;
+  auto_max_amount: string;
+  threshold_currency: string;
+  steps: AgentStep[];
+  total: number;
+  auto: number;
+  human: number;
+  human_reasons: string[];
+  first_at: string | null;
+  last_at: string | null;
+  policy: PolicyRow[];
+}
+
+export interface AgentRunResponse {
+  ok: boolean;
+  incident_id: number;
+  handled: { intent_id: number; rule_id: string; status: string }[];
+  needs_human: number[];
 }
 
 export interface Payout {
@@ -190,6 +231,7 @@ export interface IncidentDetail {
   status_history: StatusHistoryRow[];
   decisions: Decision[];
   proposals: Proposal[];
+  autonomy?: Autonomy;
   funding: { payouts: Payout[]; balances: Balance[] };
   proof: {
     pdf_link: string | null;

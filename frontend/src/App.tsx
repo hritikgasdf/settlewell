@@ -3,6 +3,7 @@ import {
   ApiError,
   approveProposal,
   cancelTransfer,
+  runAgent,
   describeError,
   getIncident,
   listIncidents,
@@ -150,6 +151,17 @@ export default function App() {
     });
   };
 
+  const handleRunAgent = (incidentId: number): void => {
+    void runAction(incidentId, 'agent', async () => {
+      const r = await runAgent(incidentId);
+      const done = r.handled.map((h) => `#${h.intent_id} ${h.status} (rule ${h.rule_id})`).join(', ');
+      const left = r.needs_human.length > 0 ? ` ${r.needs_human.length} step(s) still need a human.` : '';
+      return r.handled.length > 0
+        ? `Agent handled ${r.handled.length} low-risk step(s), auto-approved by policy: ${done}.${left}`
+        : `Nothing was auto-eligible.${left}`;
+    });
+  };
+
   const handleCancel = (incidentId: number, t: Transfer): void => {
     void runAction(incidentId, `cancel:${t.id}`, async () => {
       const r = await cancelTransfer(incidentId, t.id);
@@ -250,6 +262,7 @@ export default function App() {
             onApprove={(p) => detail && handleApprove(detail.incident.id, p)}
             onReject={(p, reason) => detail && handleReject(detail.incident.id, p, reason)}
             onCancel={(t) => detail && handleCancel(detail.incident.id, t)}
+            onRunAgent={() => detail && handleRunAgent(detail.incident.id)}
             onRetry={() => selectedId !== null && void refreshDetail(selectedId)}
           />
           {session?.note ? <p className="muted small footer-note">{session.note}</p> : null}
