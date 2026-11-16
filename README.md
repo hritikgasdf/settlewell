@@ -3,9 +3,10 @@
 **An agentic payment-ops incident commander on Airwallex.** Settlewell takes a supplier's "where's my money?" email and runs the incident to closure: it understands the claim, diagnoses the payment, handles the low-risk steps itself, and asks a human only when money is at risk. Submitted to the Airwallex Agentic Banking Hackathon, Starter Kit 03 (Payment Ops Incident Commander), as "Settlewell (formerly Where's My Money?)".
 
 > ## Try it live
+> - **Demo video:** **https://youtu.be/h0BpU4MTPPA**
 > - **Live sandbox** (real Airwallex sandbox + Claude): **https://settlewell-sandbox.onrender.com**
 > - **Mock demo** (resettable, no external calls): **https://settlewell-demo.onrender.com**
-> - **Passcode:** provided to judges privately (not in this repo).
+> - **No passcode needed:** it was removed so judges can try the app freely (it guarded real Claude API and Airwallex sandbox usage).
 > - **First load may take ~1 minute** (Render free tier cold start).
 
 ## What it does and why

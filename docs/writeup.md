@@ -4,8 +4,8 @@ Airwallex Agentic Banking Hackathon, Starter Kit 03: Payment Ops Incident Comman
 
 - **Live sandbox** (real Airwallex sandbox + Claude): https://settlewell-sandbox.onrender.com
 - **Mock demo** (resettable): https://settlewell-demo.onrender.com
-- **Passcode:** shared with judges privately. First load may take ~1 minute (free-tier cold start).
-- **Demo video:** [VIDEO LINK — add before submitting]
+- **No passcode needed** (removed for judging; it guarded real Claude API and Airwallex sandbox usage). First load may take ~1 minute (free-tier cold start).
+- **Demo video:** https://youtu.be/h0BpU4MTPPA
 - **Code:** https://github.com/hritikgasdf/settlewell (setup in the README)
 
 ### Problem

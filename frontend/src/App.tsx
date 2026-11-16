@@ -216,6 +216,15 @@ export default function App() {
         >
           {busy === 'reset' ? 'Resetting…' : 'Reset demo'}
         </button>
+        <a
+          className="demo-video-link"
+          href="https://youtu.be/h0BpU4MTPPA"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Watch the Settlewell demo video (opens YouTube)"
+        >
+          ▶ Demo video
+        </a>
         <span className={apiDown ? 'conn conn-down' : 'conn conn-up'} role="status">
           {apiDown ? 'API unreachable' : session ? 'Connected' : 'Connecting…'}
         </span>
