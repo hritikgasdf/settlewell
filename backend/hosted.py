@@ -7,6 +7,8 @@ Environment (names only; values are never printed):
   SETTLEWELL_MODE           mock (default) or sandbox
   SETTLEWELL_DB             SQLite path (default /data/settlewell.db, else /tmp/settlewell/...)
   SETTLEWELL_DEMO_PASSCODE  passcode gate for every page and route except /health
+  SETTLEWELL_PUBLIC_DEMO    1 = no passcode gate, on purpose (judging); sandbox reruns stay
+                            rate limited to one per 120 s
   SETTLEWELL_SESSION_SECRET optional cookie-signing secret (random per process if unset)
   SETTLEWELL_PUBLIC_ORIGIN  e.g. https://settlewell.up.railway.app (RAILWAY_PUBLIC_DOMAIN is
                             picked up automatically)
@@ -18,8 +20,8 @@ Environment (names only; values are never printed):
   AIRWALLEX_SANDBOX_CLIENT_ID, AIRWALLEX_SANDBOX_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
   AIRWALLEX_WEBHOOK_SECRET  sandbox mode only
 
-Sandbox mode is refused without a passcode: a public link must not spend sandbox calls or
-model credits for anyone who finds it.
+Sandbox mode is refused without a passcode unless SETTLEWELL_PUBLIC_DEMO=1 says so on purpose:
+a public link must not spend sandbox calls or model credits by accident.
 """
 
 from __future__ import annotations
@@ -143,7 +145,9 @@ def build(env=None):
     except ValueError as error:
         raise SystemExit(f"refused: {error}") from None
     config = resolve_mode(requested, source)
-    if requested == "sandbox" and not hosting.gate_enabled:
+    from backend.hosting import public_demo
+
+    if requested == "sandbox" and not hosting.gate_enabled and not public_demo(source):
         raise SystemExit("refused: sandbox mode needs SETTLEWELL_DEMO_PASSCODE when hosted")
     if config.mode == "MOCK":
         os.environ["SETTLEWELL_MOCK"] = "1"
