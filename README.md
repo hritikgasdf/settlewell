@@ -31,7 +31,7 @@ Settlewell handles that incident end to end:
 
 ## Using the hosted demo (step by step)
 
-1. Open a URL above and enter the passcode at `/login` (cookie lasts 12 hours).
+1. Open a URL above. No passcode is needed; the console opens directly (first load may take ~1 minute).
 2. **Reset demo** (console header) gives a clean run. Mock: reseeds Lumen Textiles / INV-2291 instantly. Sandbox: cancels only this run's own transfers and reruns the live hero in the background (~30–40 s; at most once every 2 minutes; progress at `GET /api/demo/status`).
 3. **Open the incident** from the Incidents list (INV-2291 on mock; the current run's invoice on sandbox; ids change on every reset or cold start).
 4. Read the **Agent handled it** card: "N of M steps handled automatically", each step with its policy rule, and why the rest needed a human.

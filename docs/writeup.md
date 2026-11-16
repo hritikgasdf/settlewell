@@ -138,7 +138,7 @@ Mock mode is the default. The eval harness refuses to run unless that flag is se
 
 ### Honest limits
 
-The mock replay uses canned transfer statuses, a canned confirmation letter, a canned `PAYOUT_REVERSAL`, and a canned quote rate (fidelity table on `/replay` and in `backend/mock_replay.py`). A trace is a drafted support request; Settlewell does not retrieve an MT103 or a UETR. Cancelling a `PROCESSING` transfer is not claimed. The call-back attestation is entered by a person and not verified by software; in the hosted autorun the human approvals are scripted and labelled as simulated. Supplier replies are never sent. Hosted webhook delivery is not verified. Sandbox money is virtual and production use is unsupported (no per-user auth, shared demo passcode). Sandbox ids change on every rerun, and a reset can stall if a run fails partway.
+The mock replay uses canned transfer statuses, a canned confirmation letter, a canned `PAYOUT_REVERSAL`, and a canned quote rate (fidelity table on `/replay` and in `backend/mock_replay.py`). A trace is a drafted support request; Settlewell does not retrieve an MT103 or a UETR. Cancelling a `PROCESSING` transfer is not claimed. The call-back attestation is entered by a person and not verified by software; in the hosted autorun the human approvals are scripted and labelled as simulated. Supplier replies are never sent. Hosted webhook delivery is not verified. Sandbox money is virtual and production use is unsupported (no per-user auth; the hosted demo is open for judging). Sandbox ids change on every rerun, and a reset can stall if a run fails partway.
 
 ### Eval and tests
 
