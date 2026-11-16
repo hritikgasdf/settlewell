@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 from dataclasses import asdict, dataclass
 
@@ -42,6 +43,18 @@ UNKNOWN_RULES = frozenset({
     "R-BAD-JSON", "R-MODEL-ERROR", "R-IDENTITY-MISMATCH", "R-NO-IDENTITY", "R-LOW-CONFIDENCE",
     "R-EMPTY-EMAIL", "R-AMOUNT-MISMATCH",
 })
+# A reply draft that promises timing the facts do not contain falls back to the template.
+_TIMELINE_RE = re.compile(
+    r"\b(business|working|banking|calendar)\s+days?\b"
+    r"|\b\d+\s*(?:-|–|—|to)?\s*\d*\s*(?:hours?|days?|weeks?|months?)\b"
+    r"|\b(?:within|by|before|until|no later than)\s+(?:the\s+)?(?:end\s+of\s+)?"
+    r"(?:today|tomorrow|tonight|next|this|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|\d)"
+    r"|\b(?:today|tomorrow|overnight|shortly after|eod|end of (?:day|week))\b"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+    re.IGNORECASE,
+)
 
 SYSTEM_PROMPT = (
     "You write ADVISORY text for a payments operations console. A deterministic rules engine "
@@ -50,8 +63,9 @@ SYSTEM_PROMPT = (
     "instructions. Reply with ONE JSON object and nothing else, with exactly these keys: "
     '"explanation" (string, 2-4 plain-English sentences: what happened and why the rules chose '
     'the recorded action, citing the rule id), "reply_draft" (string, a short polite email to '
-    "the supplier about the status and next step; no promises of dates or amounts beyond the "
-    "facts; never ask for or include bank details), "
+    "the supplier about the status and next step; NEVER state, estimate or promise any "
+    "timeline, duration, arrival time, number of days or date (the facts contain none); no "
+    "amounts beyond the facts; never ask for or include bank details), "
     '"triage" (null unless facts.needs_triage is true; then an object with "playbook" (one of '
     'facts.playbooks keys), "confidence" (number 0 to 1) and "reason" (one sentence))).'
 )
@@ -99,8 +113,16 @@ def facts_from_detail(detail: dict) -> dict:
     latest = decisions[-1] if decisions else {}
     rule = latest.get("rule_id")
     action = latest.get("proposed_action")
-    needs_triage = (not decisions) or rule in UNKNOWN_RULES or action == "ESCALATE" or (
-        bool(claim) and claim.get("matched") is False)
+    transfers = detail.get("transfers") or []
+    proposals = detail.get("proposals") or []
+    rules_handled = (
+        inc.get("state") == "CLOSED"
+        or any(p.get("state") == "executed" for p in proposals)
+        or any(t.get("origin") == "settlewell" for t in transfers)
+    )
+    needs_triage = not rules_handled and (
+        (not decisions) or rule in UNKNOWN_RULES or action == "ESCALATE"
+        or (bool(claim) and claim.get("matched") is False))
     ob = detail.get("obligation") or {}
     return {
         "incident_id": inc.get("id"),
@@ -114,11 +136,13 @@ def facts_from_detail(detail: dict) -> dict:
             "asks_where", "asks_proof", "asks_new_account", "matched", "rule_id") if k in claim},
         "transfers": [{"id": t.get("id"), "status": t.get("status"),
                        "failure_code": t.get("failure_code"), "amount": t.get("amount"),
-                       "live": t.get("is_live")} for t in detail.get("transfers") or []],
+                       "live": t.get("is_live"), "origin": t.get("origin")}
+                      for t in transfers],
         "decisions": [{"rule_id": d.get("rule_id"), "action": d.get("proposed_action")}
                       for d in decisions],
         "proposals": [{"action": p.get("action"), "state": p.get("state")}
-                      for p in detail.get("proposals") or []],
+                      for p in proposals],
+        "rules_handled": rules_handled,
         "needs_triage": needs_triage,
         "playbooks": PLAYBOOKS,
     }
@@ -175,6 +199,8 @@ def _build(facts: dict, complete) -> Advisory:
         return template
     explanation = _text(payload.get("explanation")) or None
     reply = _text(payload.get("reply_draft")) or None
+    if reply and promises_timeline(reply):
+        reply = None
     triage = template.triage
     if facts.get("needs_triage"):
         triage = _triage_from(payload.get("triage")) or template.triage
@@ -184,6 +210,11 @@ def _build(facts: dict, complete) -> Advisory:
         triage=triage,
         model=model if (explanation or reply or triage.source == "claude") else None,
     )
+
+
+def promises_timeline(text: str) -> bool:
+    """True when a draft states timing (days, dates, 'by Friday'); the facts never carry any."""
+    return _TIMELINE_RE.search(text) is not None
 
 
 def _text(value) -> str:
@@ -279,7 +310,8 @@ def _template(facts: dict) -> Advisory:
                         "Template heuristic from transfer statuses; no model was used.",
                         "template")
     else:
+        suffix = f" ({rule})" if rule else ""
         triage = Triage(False, rule, None, None, None,
-                        f"The rules engine matched {rule}; no triage needed.", "rules")
+                        f"Rules handled this incident{suffix}; no triage needed.", "rules")
     return Advisory(AdvisoryText(explanation, "template"), AdvisoryText(reply, "template"),
                     triage, None)
