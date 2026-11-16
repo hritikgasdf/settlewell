@@ -25,6 +25,17 @@ Settlewell handles the incident from that email through to closure. It matches t
 
 The safety core follows Airwallex's documented reference pattern: amounts copied from Airwallex's record, one replacement per failure, approver ≠ proposer, and closure with both dispositions, plus its documented single-use quote lock for FX conversions. The reserve floor and the locked USD→EUR quote are part of that safety. They are not the headline. The headline is the supplier incident: cancel a still-scheduled duplicate at €0, gate the proof PDF on status, decide from Airwallex failure codes, and version the bank details.
 
+### AI for understanding, rules for money
+
+Claude (Haiku, `claude-haiku-4-5` by default) has four touchpoints. None of them can move money.
+
+1. **Claim parser** (`backend/claims.py`): reads the supplier's email and proposes JSON. A strict validator and the pinned supplier record accept it or escalate.
+2. **Incident explainer** (`backend/advisory.py`): writes a plain-English summary of the incident and why the deterministic rules chose the recorded action.
+3. **Supplier reply draft**: an editable draft in the console. It is never sent; replies stay queued in the outbox until a person approves them.
+4. **Unknown-incident triage**: when no playbook matched (an escalation or unknown rule), Claude suggests one playbook name from a fixed list with a confidence. It is a suggestion only; nothing executes from it.
+
+The three advisory outputs are plain strings served by a read-only GET (`/api/incidents/{id}/advisory`). No money module imports `backend/advisory.py` (a test enforces this), the endpoint leaves the ledger byte-for-byte unchanged, and every money step still goes through `execute()` with a bound, single-use human approval. In MOCK mode, without `ANTHROPIC_API_KEY`, or on any error or timeout, the console shows a deterministic template, and each section is labelled with its source (Claude or template). Results are cached per incident so page loads do not re-call the model.
+
 ### Who it is for
 
 The two demo identities are `ap-clerk` and `finance-approver`. The clerk proposes. The finance approver approves. The same person cannot approve their own proposal. The supplier in the seeded hero is Lumen Textiles GmbH, invoice INV-2291, 4200.00 EUR. That supplier and those emails are synthetic.

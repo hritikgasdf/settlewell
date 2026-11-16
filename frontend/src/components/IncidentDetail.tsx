@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { BankRecord, IncidentDetail as Detail, Proposal, Transfer } from '../types';
+import { AdvisoryPanel } from './AdvisoryPanel';
 import { Card, Empty, Field, Pill, show } from './Panels';
 import { ProposalCard } from './ProposalCard';
 import { TransferCard } from './TransferCard';
@@ -329,6 +330,8 @@ export function IncidentDetailPanel(props: Props) {
           If the status changed after this page loaded, the link can return an error; reload the incident.
         </p>
       </Card>
+
+      <AdvisoryPanel incidentId={d.incident.id} />
 
       <Card id="proposals-title" title="Proposals">
         {d.proposals.length > 0 ? (

@@ -224,3 +224,27 @@ export interface RejectResponse {
   incident_id: number;
   intent: Proposal;
 }
+
+/** Advisory-only AI text. Shown to people; never sent to any money action. */
+export interface AdvisoryText {
+  text: string;
+  source: 'claude' | 'template' | string;
+}
+
+export interface AdvisoryTriage {
+  needed: boolean;
+  matched_rule: string | null;
+  playbook: string | null;
+  playbook_label: string | null;
+  confidence: number | null;
+  reason: string;
+  source: 'claude' | 'template' | 'rules' | string;
+}
+
+export interface Advisory {
+  explanation: AdvisoryText;
+  reply_draft: AdvisoryText;
+  triage: AdvisoryTriage;
+  model: string | null;
+  advisory_only: boolean;
+}

@@ -33,6 +33,7 @@
 - `backend/approvals.py` — Bound, single-use approvals. A changed detail voids the grant.
 - `backend/bank_change.py` — New supplier details become a new beneficiary only after validate and a call-back.
 - `backend/claims.py` — Strict claim parser. A model may only propose JSON. Code accepts it or escalates.
+- `backend/advisory.py` — Advisory-only AI text (explainer, reply draft, triage). Read-only; no money module imports it.
 - `backend/console.py` — Mock console for the first four hero beats. No Airwallex calls.
 - `backend/eval_cases.py` — The first 15 incident fixtures. Synthetic names only. No account data.
 - `backend/eval_harness.py` — Run the first 15 incidents offline. No Airwallex calls and no secrets.

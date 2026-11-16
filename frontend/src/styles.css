@@ -609,3 +609,13 @@ input:focus-visible {
   margin-left: auto;
   margin-right: 12px;
 }
+
+.advisory-draft {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid #ccd;
+  border-radius: 6px;
+}
