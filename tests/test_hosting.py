@@ -359,3 +359,12 @@ def test_sandbox_demo_reset_refusal_stops_rerun(tmp_path):
     demo.join(5)
     status = demo.status()
     assert ran == [] and status["state"] == "failed" and "tid:SENT" in status["problems"]
+
+
+def test_public_demo_turns_gate_off_and_allows_sandbox():
+    from backend.hosting import Hosting
+
+    env = {"SETTLEWELL_DEMO_PASSCODE": "x" * 12, "SETTLEWELL_PUBLIC_DEMO": "1"}
+    assert Hosting.from_env(env).gate_enabled is False
+    assert Hosting.from_env({"SETTLEWELL_DEMO_PASSCODE": "x" * 12}).gate_enabled is True
+    assert Hosting.from_env({**env, "SETTLEWELL_PUBLIC_DEMO": "0"}).gate_enabled is True

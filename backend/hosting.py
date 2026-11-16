@@ -63,6 +63,11 @@ def host_of(raw: str) -> str:
     return raw.split(":")[0]
 
 
+def public_demo(env: Mapping[str, str]) -> bool:
+    """SETTLEWELL_PUBLIC_DEMO=1 turns the passcode gate off on purpose (host checks stay on)."""
+    return (env.get("SETTLEWELL_PUBLIC_DEMO") or "").strip() == "1"
+
+
 @dataclass
 class Hosting:
     allowed_hosts: frozenset[str] = frozenset()
@@ -94,6 +99,8 @@ class Hosting:
             if not host or any(c in host for c in "/@ \t") or host == "*":
                 raise ValueError("SETTLEWELL_ALLOWED_HOSTS must be plain host names")
         passcode = source.get("SETTLEWELL_DEMO_PASSCODE") or ""
+        if public_demo(source):  # explicit opt-in: judges open the link with no passcode
+            passcode = ""
         raw_secret = source.get("SETTLEWELL_SESSION_SECRET") or ""
         secret = raw_secret.encode() if raw_secret else secrets.token_bytes(32)
         return cls(frozenset(hosts), frozenset(origins), passcode, secret,
