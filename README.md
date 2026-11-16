@@ -23,7 +23,7 @@ Settlewell handles that incident end to end:
 **Who it is for:** AP clerks and finance approvers at businesses paying suppliers through Airwallex.
 
 **Key value**
-- **Fewer human steps.** On the live sandbox hero run the agent handled 5 of 7 steps itself; only the bank change and the replacement payment needed a person. The run took about 43 seconds. At roughly 3 minutes per manual step, that is an *estimated* ~15 minutes saved per incident (estimate, not measured).
+- **Fewer human steps.** On the live sandbox hero run the agent handled 5 of 7 steps itself; only the bank change and the replacement payment needed a person (no FX top-up was needed on that run; when one is, the FX conversion is a third human step). The run took about 43 seconds. At roughly 3 minutes per manual step, that is an *estimated* ~15 minutes saved per incident (estimate, not measured).
 - **Can't double-pay.** One replacement per failure, amounts copied from Airwallex's record, the obligation closes only when the invoice is paid once.
 - **Fraud-safe bank changes.** New details become a new beneficiary only after validation and a call-back attestation; the old beneficiary is never modified.
 - **AI for understanding, rules for money.** No model output can approve, execute or send anything (test-enforced).
@@ -34,9 +34,9 @@ Settlewell handles that incident end to end:
 2. **Reset demo** (console header) gives a clean run. Mock: reseeds Lumen Textiles / INV-2291 instantly. Sandbox: cancels only this run's own transfers and reruns the live hero in the background (~30–40 s; at most once every 2 minutes; progress at `GET /api/demo/status`).
 3. **Open the incident** from the Incidents list (INV-2291 on mock; the current run's invoice on sandbox; ids change on every reset or cold start).
 4. Read the **Agent handled it** card: "N of M steps handled automatically", each step with its policy rule, and why the rest needed a human.
-5. Read the **AI explanation (advisory)** card: why the rules chose the action, triage suggestion, and an editable supplier reply draft. Each section is labelled Claude or template.
+5. Read the **AI explanation (advisory)** card: why the rules chose the action, triage suggestion, and an editable supplier reply draft. Each section is labelled with its source: "Claude (Haiku)", "Rules engine" or "Template (no model)".
 6. **Approve or Reject** any proposal waiting for a human (e.g. the duplicate cancel on mock when policy leaves it to a person). Approver must differ from proposer; approvals are single-use and bound to the exact terms.
-7. Check the tabs: **Evidence** (proof PDF, bank return code), **Status history**, **Decisions** (rule ids), **Audit** (every action, "auto-approved by policy (rule X)" or the human approver). The **Funding** view shows balances and the locked FX quote.
+7. Check the tabs: **Evidence** (proof PDF, bank return code), **Status history**, **Decisions** (rule ids), **Audit** (every action, "auto-approved by policy (rule X)" or the human approver). The **Funding check** card in the incident shows the balance vs reserve floor and any locked FX quote.
 8. On sandbox, the human-gated steps of the autorun are approved by a scripted `finance-approver`, labelled "hosted autorun simulates this human approval".
 
 ## Prerequisites
@@ -159,8 +159,6 @@ Auto steps still go through `execute()` with a single-use approval consumed as `
 
 ### What is live vs mock
 
-| Surface | Status | Label in the product |
-|---|---|---|
 | Surface | Status | Label in the product |
 |---|---|---|
 | Proof PDF | **Sandbox: genuine bank PDF**, fetched, persisted and served only after live status/ownership/hash checks. **Mock seed: synthetic**, never bank proof | Origin label; mock bytes explicitly labelled synthetic |

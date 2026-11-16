@@ -29,7 +29,7 @@ Claude (Haiku, `claude-haiku-4-5` by default) has four touchpoints. None of them
 3. **Supplier reply draft**: an editable draft in the console. It is never sent; replies stay queued in the outbox until a person approves them.
 4. **Unknown-incident triage**: when no playbook matched (an escalation or unknown rule), Claude suggests one playbook name from a fixed list with a confidence. It is a suggestion only; nothing executes from it.
 
-The three advisory outputs are plain strings served by a read-only GET (`/api/incidents/{id}/advisory`). No money module imports `backend/advisory.py` (a test enforces this), the endpoint leaves the ledger byte-for-byte unchanged, and every money step still goes through `execute()` with a bound, single-use human approval. In MOCK mode, without `ANTHROPIC_API_KEY`, or on any error or timeout, the console shows a deterministic template, and each section is labelled with its source (Claude or template). Results are cached per incident so page loads do not re-call the model.
+The three advisory outputs are plain strings served by a read-only GET (`/api/incidents/{id}/advisory`). No money module imports `backend/advisory.py` (a test enforces this), the endpoint leaves the ledger byte-for-byte unchanged, and every money step still goes through `execute()` with a bound, single-use human approval. In MOCK mode, without `ANTHROPIC_API_KEY`, or on any error or timeout, the console shows a deterministic template, and each section is labelled with its source (Claude, rules engine or template). Results are cached per incident so page loads do not re-call the model.
 
 ### Risk-tiered autonomy: the agent acts on its own when risk is low and asks a human only when money is at risk
 
@@ -64,7 +64,7 @@ handled automatically, K needed a human (reasons)". In the hosted sandbox autoru
 
 ### Benefits
 
-- **Fewer human steps.** On the live hosted sandbox hero run the agent handled **5 of 7 steps** by itself (read the claim, check status, fetch the bank return code, attach proof, cancel the scheduled duplicate before any money left). Only the 2 money-risky steps, the new bank details and the replacement payment, waited for a human. The whole run took about **43 seconds**.
+- **Fewer human steps.** On the live hosted sandbox hero run the agent handled **5 of 7 steps** by itself (read the claim, check status, fetch the bank return code, attach proof, cancel the scheduled duplicate before any money left). Only the 2 money-risky steps, the new bank details and the replacement payment, waited for a human. (No FX top-up was needed on that run; when the reserve floor requires one, the FX conversion is a further human-approved step.) The whole run took about **43 seconds**.
 - **Time saved (estimate).** At roughly 3 minutes per manual step, five automated steps save an **estimated ~15 minutes per incident**. This is an estimate, not a measured study.
 - **No double payment.** One replacement per failure; the obligation closes only when the invoice is paid once.
 - **Fraud-safe bank changes.** A call-back attestation plus a second-person approval before any new beneficiary is paid.
