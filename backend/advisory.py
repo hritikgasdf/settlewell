@@ -143,6 +143,8 @@ def advise(facts: dict, *, complete=None) -> Advisory:
         return hit
     result = _build(facts, complete if complete is not None else (
         _anthropic_complete if use_model else None))
+    if use_model and result.model is None:
+        return result  # a failed model call falls back now but is retried on the next load
     with _LOCK:
         if len(_CACHE) >= MAX_CACHE:
             _CACHE.pop(next(iter(_CACHE)))
@@ -256,8 +258,9 @@ def _template(facts: dict) -> Advisory:
             f"{statuses or 'no transfers on record'}. No rule has decided yet, so nothing "
             "moves until a person reviews the evidence.")
     next_step = {
-        "STOP_DUPLICATE": "We found a second, duplicate payment scheduled and are cancelling "
-                          "it so you are paid exactly once; the original payment is on its way.",
+        "STOP_DUPLICATE": "We found a second, duplicate payment scheduled and expect to cancel "
+                          "it after internal approval, so you are paid exactly once; the "
+                          "original payment is on its way.",
         "WAIT": "The payment is in progress with the banking network.",
         "PROOF": "We are preparing proof of payment for you.",
         "TRACE": "We are asking the banking network to trace the payment.",

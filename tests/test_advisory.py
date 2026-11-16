@@ -206,3 +206,18 @@ def test_endpoint_is_read_only_and_never_executes(tmp_path, monkeypatch):
     assert "INV-2291" in body["reply_draft"]["text"]
     assert _db_digest(path) == before
     assert client.get("/api/incidents/999/advisory").status_code == 404
+
+
+def test_failed_model_call_is_not_cached():
+    calls = []
+
+    def flaky(facts):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError
+        return json.dumps({"explanation": "ok", "reply_draft": "ok", "triage": None}), "m"
+
+    assert advisory.advise(_facts(), complete=flaky).explanation.source == "template"
+    assert advisory.advise(_facts(), complete=flaky).explanation.source == "claude"
+    assert advisory.advise(_facts(), complete=flaky).explanation.source == "claude"
+    assert len(calls) == 2
